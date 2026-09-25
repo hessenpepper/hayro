@@ -63,6 +63,9 @@ use vello_cpu::peniko::{Compose, Fill, Mix};
 use vello_cpu::{Mask, Pixmap, RenderContext, peniko};
 
 mod clip;
+mod display_list;
+// Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
+pub use display_list::{DisplayList, render_region};
 mod glyph;
 mod image;
 mod mask;
@@ -362,4 +365,21 @@ fn convert_blend_mode(blend_mode: BlendMode) -> peniko::BlendMode {
     };
 
     peniko::BlendMode::new(mix, Compose::SrcOver)
+}
+
+// Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
+// Display-list replay (display_list.rs): what `apply_draw_props` and `set_paint` do for a
+// plain colour with no soft mask, from values the list owns instead of a `DrawProps`.
+impl Renderer<'_> {
+    pub(crate) fn apply_plain(&mut self, transform: Affine, blend_mode: BlendMode) {
+        self.ctx.set_transform(transform);
+        self.apply_soft_mask(None);
+        self.ctx.set_blend_mode(convert_blend_mode(blend_mode));
+    }
+
+    pub(crate) fn set_plain_color(&mut self, rgba: [u8; 4]) {
+        self.ctx.set_paint_transform(Affine::IDENTITY);
+        self.ctx
+            .set_paint(AlphaColor::from_rgba8(rgba[0], rgba[1], rgba[2], rgba[3]));
+    }
 }

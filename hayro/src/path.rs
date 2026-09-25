@@ -139,3 +139,82 @@ pub(crate) fn max_factor(transform: &Affine) -> f32 {
         .length()
         .max(y_advance.to_vec2().length()) as f32
 }
+
+// Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
+// Display-list replay: `draw_path` and `draw_rect` above, for a plain colour.
+impl Renderer<'_> {
+    fn fill_path_rgba(
+        &mut self,
+        path: &BezPath,
+        transform: Affine,
+        rgba: [u8; 4],
+        blend: hayro_interpret::BlendMode,
+        fill_rule: FillRule,
+    ) {
+        self.ctx.set_fill_rule(convert_fill_rule(fill_rule));
+        self.apply_plain(transform, blend);
+        self.set_plain_color(rgba);
+        self.ctx.fill_path(path);
+    }
+
+    fn stroke_path_rgba(
+        &mut self,
+        path: &BezPath,
+        transform: Affine,
+        rgba: [u8; 4],
+        blend: hayro_interpret::BlendMode,
+        stroke_props: &StrokeProps,
+    ) {
+        self.apply_plain(transform, blend);
+        self.set_stroke_properties(stroke_props, false);
+        self.set_plain_color(rgba);
+        self.ctx.stroke_path(path);
+    }
+
+    pub(crate) fn draw_path_rgba(
+        &mut self,
+        path: &BezPath,
+        transform: Affine,
+        rgba: [u8; 4],
+        blend: hayro_interpret::BlendMode,
+        draw_mode: &DrawMode,
+    ) {
+        match draw_mode {
+            DrawMode::Fill(f) => self.fill_path_rgba(path, transform, rgba, blend, *f),
+            DrawMode::Stroke(s) => self.stroke_path_rgba(path, transform, rgba, blend, s),
+            DrawMode::FillAndStroke(f, s) => {
+                self.fill_path_rgba(path, transform, rgba, blend, *f);
+                self.stroke_path_rgba(path, transform, rgba, blend, s);
+            }
+            DrawMode::Invisible => {}
+        }
+    }
+
+    pub(crate) fn draw_rect_rgba(
+        &mut self,
+        rect: &Rect,
+        transform: Affine,
+        rgba: [u8; 4],
+        blend: hayro_interpret::BlendMode,
+        draw_mode: &DrawMode,
+    ) {
+        match draw_mode {
+            DrawMode::Fill(fill_rule) => {
+                self.ctx.set_fill_rule(convert_fill_rule(*fill_rule));
+                self.apply_plain(transform, blend);
+                self.set_plain_color(rgba);
+                self.ctx.fill_rect(rect);
+            }
+            DrawMode::Stroke(s) => {
+                let path = rect.to_path(0.1);
+                self.stroke_path_rgba(&path, transform, rgba, blend, s);
+            }
+            DrawMode::FillAndStroke(fill_rule, s) => {
+                self.draw_rect_rgba(rect, transform, rgba, blend, &DrawMode::Fill(*fill_rule));
+                let path = rect.to_path(0.1);
+                self.stroke_path_rgba(&path, transform, rgba, blend, s);
+            }
+            DrawMode::Invisible => {}
+        }
+    }
+}

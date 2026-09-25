@@ -228,3 +228,46 @@ impl Renderer<'_> {
         }
     }
 }
+
+// Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
+// Display-list replay: `fill_outline_run` and `stroke_outline_run` above, for a plain
+// colour, from outlines (glyph space, 1000 units to the em) and glyph transforms the list
+// owns.
+impl Renderer<'_> {
+    pub(crate) fn draw_outline_run(
+        &mut self,
+        glyphs: &[(std::sync::Arc<BezPath>, Affine)],
+        transform: Affine,
+        rgba: [u8; 4],
+        blend: hayro_interpret::BlendMode,
+        draw_mode: &DrawMode,
+    ) {
+        let fill = |this: &mut Self| {
+            this.ctx.set_fill_rule(convert_fill_rule(FillRule::NonZero));
+            this.apply_plain(transform, blend);
+            this.set_plain_color(rgba);
+            for (outline, t) in glyphs {
+                this.ctx.set_transform(transform * *t);
+                this.ctx.fill_path(outline.as_ref());
+            }
+        };
+        let stroke = |this: &mut Self, stroke_props: &StrokeProps| {
+            this.apply_plain(transform, blend);
+            this.set_stroke_properties(stroke_props, true);
+            this.set_plain_color(rgba);
+            for (outline, t) in glyphs {
+                let outline = *t * outline.as_ref().clone();
+                this.ctx.stroke_path(&outline);
+            }
+        };
+        match draw_mode {
+            DrawMode::Fill(_) => fill(self),
+            DrawMode::Stroke(s) => stroke(self, s),
+            DrawMode::FillAndStroke(_, s) => {
+                fill(self);
+                stroke(self, s);
+            }
+            DrawMode::Invisible => {}
+        }
+    }
+}

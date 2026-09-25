@@ -685,3 +685,107 @@ impl<S: Simd> Div255Ext for u16x16<S> {
 const fn div_255(value: u16) -> u16 {
     (value + 255) >> 8
 }
+
+// Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
+/// An image decoded once, at full resolution, for a display list (`display_list.rs`).
+#[derive(Clone)]
+pub(crate) enum DecodedImage {
+    Raster {
+        image: ImageData,
+        alpha: Option<LumaData>,
+    },
+    /// A stencil mask painted in one colour.
+    StencilColor { mask: LumaData, rgba: [u8; 4] },
+}
+
+/// What decoding an image for a display list gave.
+pub(crate) enum Decoded {
+    Image(DecodedImage),
+    /// Decoding failed: `draw_pdf_image` draws nothing either.
+    Nothing,
+    /// A stencil painted with a pattern: the list can't hold it.
+    Unsupported,
+}
+
+impl DecodedImage {
+    pub(crate) fn decode(image: &hayro_interpret::Image<'_, '_>) -> Decoded {
+        let mut out = Decoded::Nothing;
+        match image {
+            hayro_interpret::Image::Stencil(s) => s.with_stencil(
+                |mask, paint| {
+                    out = match paint {
+                        Paint::Color(c) => Decoded::Image(Self::StencilColor {
+                            mask,
+                            rgba: c.to_rgba().to_rgba8(),
+                        }),
+                        Paint::Pattern(_) => Decoded::Unsupported,
+                    };
+                },
+                None,
+            ),
+            hayro_interpret::Image::Raster(r) => r.with_rgba(
+                |image, alpha| out = Decoded::Image(Self::Raster { image, alpha }),
+                None,
+            ),
+        }
+        out
+    }
+}
+
+impl Renderer<'_> {
+    /// `draw_pdf_image` from an image decoded beforehand, with no soft mask.
+    pub(crate) fn draw_decoded_image(
+        &mut self,
+        decoded: &DecodedImage,
+        transform: Affine,
+        blend: hayro_interpret::BlendMode,
+    ) {
+        self.apply_plain(transform, blend);
+        let mut transform = transform;
+        self.ctx.set_paint_transform(Affine::IDENTITY);
+        self.ctx.set_aliasing_threshold(Some(1));
+        match decoded {
+            DecodedImage::Raster { image, alpha } => {
+                let (sx, sy) = image.scale_factors();
+                transform *= Affine::scale_non_uniform(sx as f64, sy as f64);
+                self.ctx.set_transform(transform);
+                self.draw_image(image.clone(), alpha.clone());
+            }
+            DecodedImage::StencilColor { mask, rgba } => {
+                transform *= Affine::scale_non_uniform(
+                    mask.scale_factors.0 as f64,
+                    mask.scale_factors.1 as f64,
+                );
+                let alpha = rgba[3];
+                let blend_mode = self.ctx.blend_mode();
+                let push_layer = alpha != 255 || blend_mode != peniko::BlendMode::default();
+                self.ctx.set_transform(transform);
+                if push_layer {
+                    self.ctx.push_layer(
+                        None,
+                        Some(blend_mode),
+                        Some(alpha as f32 / 255.0),
+                        None,
+                        None,
+                    );
+                }
+                let old_rule = *self.ctx.fill_rule();
+                self.ctx.set_fill_rule(Fill::NonZero);
+                self.draw_image(
+                    RenderImageData::Solid(SolidColorImage {
+                        color: [rgba[0], rgba[1], rgba[2]],
+                        width: mask.width,
+                        height: mask.height,
+                        interpolate: mask.interpolate,
+                    }),
+                    Some(mask.clone()),
+                );
+                if push_layer {
+                    self.ctx.pop_layer();
+                }
+                self.ctx.set_fill_rule(old_rule);
+            }
+        }
+        self.ctx.set_aliasing_threshold(None);
+    }
+}
