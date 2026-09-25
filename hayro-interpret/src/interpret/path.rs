@@ -107,9 +107,14 @@ pub(crate) fn stroke_path_impl<'a>(
     let props = context.draw_props(true);
 
     let path = path.unwrap_or(context.path());
+    // Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
+    // A dash pattern runs from the path's first point in the path's own direction (ISO
+    // 32000 §8.4.3.6). A rectangle redrawn from `path_as_rect` starts at another corner and
+    // may run the other way, which moves every dash, so a dashed stroke keeps its path.
+    let dashed = !stroke_props.dash_array.is_empty();
     let draw_mode = DrawMode::Stroke(stroke_props);
 
-    if let Some(rect) = path_as_rect(path) {
+    if let Some(rect) = path_as_rect(path).filter(|_| !dashed) {
         device.draw_rect(&rect, props, &draw_mode);
     } else {
         device.draw_path(path, props, &draw_mode);
