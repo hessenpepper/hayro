@@ -127,7 +127,12 @@ pub(crate) fn show_glyph_run<'a>(ctx: &mut Context<'a>, device: &mut impl Device
                 device.draw_glyph_run(&run, fill_props, &DrawMode::Fill(FillRule::NonZero));
                 device.draw_glyph_run(&run, stroke_draw_props, &DrawMode::Stroke(stroke_props));
             }
-            TextRenderingMode::Clip => {}
+            TextRenderingMode::Clip => {
+                // Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
+                // Nothing is painted, but the glyphs are still text on the page: pass them
+                // on as invisible, as mode 3 is, so that devices extracting text see them.
+                device.draw_glyph_run(&run, fill_props, &DrawMode::Invisible);
+            }
         }
 
         clip_path
