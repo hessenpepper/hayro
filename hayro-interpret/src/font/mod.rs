@@ -16,7 +16,7 @@ use bitflags::bitflags;
 use hayro_syntax::object::Name;
 use hayro_syntax::object::dict::keys::SUBTYPE;
 use hayro_syntax::object::dict::keys::*;
-use hayro_syntax::object::{Dict, Stream};
+use hayro_syntax::object::{Array, Dict, Stream};
 use hayro_syntax::page::Resources;
 use hayro_syntax::xref::XRef;
 use kurbo::{Affine, BezPath, Vec2};
@@ -159,9 +159,17 @@ pub struct OutlineGlyph {
     pub(crate) id: GlyphId,
     pub(crate) font: OutlineFont,
     pub(crate) char_code: u32,
+    // Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
+    pub(crate) descriptor: DescriptorMetrics,
 }
 
 impl OutlineGlyph {
+    // Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
+    /// The `/FontDescriptor` metrics of this glyph's font; see [`DescriptorMetrics`].
+    pub fn descriptor_metrics(&self) -> DescriptorMetrics {
+        self.descriptor
+    }
+
     /// Return the outline of the glyph, assuming an upem value of 1000.
     pub fn outline(&self) -> BezPath {
         self.font.outline_glyph(self.id, self.char_code)
@@ -258,7 +266,40 @@ impl CacheKey for Type3Glyph<'_> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Font<'a>(u128, FontType<'a>);
+pub(crate) struct Font<'a>(u128, FontType<'a>, DescriptorMetrics);
+
+// Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
+/// Metrics from a font's `/FontDescriptor` (for a Type 0 font, its descendant font's), in
+/// glyph space units (1/1000 em), exactly as the PDF gives them. `None` where the
+/// descriptor or the entry is missing. hayro itself doesn't use these; they are for
+/// devices that need the PDF's own values, such as text extraction.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DescriptorMetrics {
+    /// `/Ascent`.
+    pub ascent: Option<f32>,
+    /// `/Descent` (negative below the baseline).
+    pub descent: Option<f32>,
+    /// `/CapHeight`.
+    pub cap_height: Option<f32>,
+}
+
+impl DescriptorMetrics {
+    fn from_font_dict(dict: &Dict<'_>) -> Self {
+        let descriptor = dict.get::<Dict<'_>>(FONT_DESC).or_else(|| {
+            dict.get::<Array<'_>>(DESCENDANT_FONTS)
+                .and_then(|a| a.iter::<Dict<'_>>().next())
+                .and_then(|d| d.get::<Dict<'_>>(FONT_DESC))
+        });
+        let Some(d) = descriptor else {
+            return Self::default();
+        };
+        Self {
+            ascent: d.get::<f32>(ASCENT),
+            descent: d.get::<f32>(DESCENT),
+            cap_height: d.get::<f32>(CAP_HEIGHT),
+        }
+    }
+}
 
 impl<'a> Font<'a> {
     pub(crate) fn new(
@@ -290,7 +331,11 @@ impl<'a> Font<'a> {
 
         let cache_key = dict.cache_key();
 
-        Some(Self(cache_key, f_type))
+        Some(Self(
+            cache_key,
+            f_type,
+            DescriptorMetrics::from_font_dict(dict),
+        ))
     }
 
     pub(crate) fn new_standard(
@@ -299,7 +344,11 @@ impl<'a> Font<'a> {
     ) -> Option<Self> {
         let font = Type1Font::new_standard(standard_font, font_resolver)?;
 
-        Some(Self(0, FontType::Type1(Rc::new(font))))
+        Some(Self(
+            0,
+            FontType::Type1(Rc::new(font)),
+            DescriptorMetrics::default(),
+        ))
     }
 
     pub(crate) fn map_code(&self, code: u32) -> GlyphId {
@@ -337,6 +386,7 @@ impl<'a> Font<'a> {
                     id: glyph,
                     font,
                     char_code,
+                    descriptor: self.2,
                 })
             }
             FontType::TrueType(t) => {
@@ -345,6 +395,7 @@ impl<'a> Font<'a> {
                     id: glyph,
                     font,
                     char_code,
+                    descriptor: self.2,
                 })
             }
             FontType::Type0(t) => {
@@ -353,6 +404,7 @@ impl<'a> Font<'a> {
                     id: glyph,
                     font,
                     char_code,
+                    descriptor: self.2,
                 })
             }
             FontType::Type3(t) => {
