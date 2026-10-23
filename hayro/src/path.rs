@@ -19,12 +19,24 @@ impl Renderer<'_> {
             line_width *= threshold;
         }
 
+        // At a device width of at most one pixel, round caps and joins are indistinguishable
+        // from square caps and bevel joins, which are much cheaper to construct.
+        let is_thin = transformed_width <= 1.0;
+        let cap = match stroke_props.line_cap {
+            kurbo::Cap::Round if is_thin => kurbo::Cap::Square,
+            cap => cap,
+        };
+        let join = match stroke_props.line_join {
+            kurbo::Join::Round if is_thin => kurbo::Join::Bevel,
+            join => join,
+        };
+
         let stroke = kurbo::Stroke {
             width: line_width as f64,
-            join: stroke_props.line_join,
+            join,
             miter_limit: stroke_props.miter_limit as f64,
-            start_cap: stroke_props.line_cap,
-            end_cap: stroke_props.line_cap,
+            start_cap: cap,
+            end_cap: cap,
             dash_pattern: stroke_props.dash_array.iter().map(|n| *n as f64).collect(),
             dash_offset: stroke_props.dash_offset as f64,
         };
@@ -46,7 +58,12 @@ impl Renderer<'_> {
         if let Some(clip_path) = clip_path.as_ref() {
             self.push_clip_path_inner(clip_path, FillRule::NonZero);
         }
-        self.ctx.stroke_path(path);
+        if let Some(outline) = single_segment_outline(path, self.ctx.stroke()) {
+            self.ctx.set_fill_rule(convert_fill_rule(FillRule::NonZero));
+            self.ctx.fill_path(&outline);
+        } else {
+            self.ctx.stroke_path(path);
+        }
         if clip_path.is_some() {
             self.ctx.pop_clip();
         }
@@ -140,7 +157,7 @@ pub(crate) fn max_factor(transform: &Affine) -> f32 {
         .max(y_advance.to_vec2().length()) as f32
 }
 
-// Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
+// Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25; changed by claude-opus-5-5 (medium effort, orchestrator), 2026-10-22: upstream merge
 // Display-list replay: `draw_path` and `draw_rect` above, for a plain colour.
 impl Renderer<'_> {
     fn fill_path_rgba(
@@ -168,7 +185,12 @@ impl Renderer<'_> {
         self.apply_plain(transform, blend);
         self.set_stroke_properties(stroke_props, false);
         self.set_plain_color(rgba);
-        self.ctx.stroke_path(path);
+        if let Some(outline) = single_segment_outline(path, self.ctx.stroke()) {
+            self.ctx.set_fill_rule(convert_fill_rule(FillRule::NonZero));
+            self.ctx.fill_path(&outline);
+        } else {
+            self.ctx.stroke_path(path);
+        }
     }
 
     pub(crate) fn draw_path_rgba(
@@ -217,4 +239,40 @@ impl Renderer<'_> {
             DrawMode::Invisible => {}
         }
     }
+}
+
+fn single_segment_outline(path: &BezPath, stroke: &kurbo::Stroke) -> Option<BezPath> {
+    use kurbo::{Cap, PathEl};
+
+    if !stroke.dash_pattern.is_empty() || stroke.start_cap != stroke.end_cap {
+        return None;
+    }
+
+    let (p0, p1) = match path.elements() {
+        [PathEl::MoveTo(p0), PathEl::LineTo(p1)] => (*p0, *p1),
+        _ => return None,
+    };
+
+    let d = p1 - p0;
+    let len = d.hypot();
+    if len <= 0.0 || !len.is_finite() {
+        return None;
+    }
+
+    let half = 0.5 * stroke.width;
+    let dir = d / len;
+    let n = kurbo::Vec2::new(-dir.y, dir.x) * half;
+    let (a, b) = match stroke.start_cap {
+        Cap::Butt => (p0, p1),
+        Cap::Square => (p0 - dir * half, p1 + dir * half),
+        Cap::Round => return None,
+    };
+
+    Some(BezPath::from_vec(vec![
+        PathEl::MoveTo(a + n),
+        PathEl::LineTo(b + n),
+        PathEl::LineTo(b - n),
+        PathEl::LineTo(a - n),
+        PathEl::ClosePath,
+    ]))
 }

@@ -10,7 +10,7 @@ use crate::math::{Level, Simd, dispatch, f32x8};
 pub(crate) fn apply_inverse(
     components: &mut [ComponentData],
     component_infos: &[super::codestream::ComponentInfo],
-    header: &Header<'_>,
+    header: &Header,
 ) -> Result<()> {
     if components.len() < 3 {
         return if header.strict {
@@ -61,9 +61,11 @@ fn apply_inner_impl<S: Simd>(
         // Irreversible MCT, specified in G.3.
         WaveletTransform::Irreversible97 => {
             for ((y0, y1), y2) in s0
-                .chunks_exact_mut(8)
-                .zip(s1.chunks_exact_mut(8))
-                .zip(s2.chunks_exact_mut(8))
+                .as_chunks_mut::<8>()
+                .0
+                .iter_mut()
+                .zip(s1.as_chunks_mut::<8>().0)
+                .zip(s2.as_chunks_mut::<8>().0)
             {
                 let y_0 = f32x8::from_slice(simd, y0);
                 let y_1 = f32x8::from_slice(simd, y1);
@@ -84,9 +86,11 @@ fn apply_inner_impl<S: Simd>(
         // Reversible MCT, specified in G.2.
         WaveletTransform::Reversible53 => {
             for ((y0, y1), y2) in s0
-                .chunks_exact_mut(8)
-                .zip(s1.chunks_exact_mut(8))
-                .zip(s2.chunks_exact_mut(8))
+                .as_chunks_mut::<8>()
+                .0
+                .iter_mut()
+                .zip(s1.as_chunks_mut::<8>().0)
+                .zip(s2.as_chunks_mut::<8>().0)
             {
                 let y_0 = f32x8::from_slice(simd, y0);
                 let y_1 = f32x8::from_slice(simd, y1);

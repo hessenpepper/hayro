@@ -63,6 +63,7 @@ pub(crate) fn decode_into(
         height: header.grid_position_and_size.height,
         template: header.flags.template,
         skip_mask: skip_bitmap.as_deref(),
+        strict: header.strict,
     };
     let gi = decode_gray_scale_image(header.data, &gs_params, ctx)?;
 
@@ -74,10 +75,11 @@ pub(crate) fn decode_into(
 }
 
 /// Parse a halftone region segment header (7.4.5.1).
-pub(crate) fn parse<'a>(reader: &mut Reader<'a>) -> Result<HalftoneRegionHeader<'a>> {
+pub(crate) fn parse<'a>(reader: &mut Reader<'a>, strict: bool) -> Result<HalftoneRegionHeader<'a>> {
     let region_info = parse_region_segment_info(reader)?;
     let flags_byte = reader.read_byte().ok_or(ParseError::UnexpectedEof)?;
     let mmr = flags_byte & 0x01 != 0;
+
     let template = Template::from_byte(flags_byte >> 1);
     let enable_skip = flags_byte & 0x08 != 0;
     let combination_operator = CombinationOperator::from_value(flags_byte >> 4)?;
@@ -97,8 +99,6 @@ pub(crate) fn parse<'a>(reader: &mut Reader<'a>) -> Result<HalftoneRegionHeader<
     if grid_width > MAX_DIMENSION || grid_height > MAX_DIMENSION {
         bail!(OverflowError::GridDimension);
     }
-
-    // TODO: Check grid offsets as well.
 
     let grid_horizontal_offset = reader.read_i32().ok_or(ParseError::UnexpectedEof)?;
     let grid_vertical_offset = reader.read_i32().ok_or(ParseError::UnexpectedEof)?;
@@ -126,6 +126,7 @@ pub(crate) fn parse<'a>(reader: &mut Reader<'a>) -> Result<HalftoneRegionHeader<
         grid_position_and_size,
         grid_vector,
         data,
+        strict,
     })
 }
 
@@ -165,6 +166,7 @@ pub(crate) struct HalftoneRegionHeader<'a> {
     pub(crate) grid_position_and_size: HalftoneGridPositionAndSize,
     pub(crate) grid_vector: HalftoneGridVector,
     pub(crate) data: &'a [u8],
+    pub(crate) strict: bool,
 }
 
 struct GridCoords {
@@ -305,12 +307,14 @@ fn render_patterns(
         for _ in 0..grid.width {
             let (x, y) = coords.get();
 
-            let pattern_index = gi[gi_idx] as usize;
+            let gray_value = gi[gi_idx] as usize;
             gi_idx += 1;
 
-            if pattern_index >= num_patterns {
+            if header.strict && gray_value >= num_patterns {
                 bail!(RegionError::GrayScaleOutOfRange);
             }
+
+            let pattern_index = gray_value.min(num_patterns - 1);
 
             // Check whether we can use the blit fast path.
             let shifted =
@@ -326,9 +330,6 @@ fn render_patterns(
                 let first_word = xu / WORD_BITS;
                 let offset = xu % WORD_BITS;
                 let two = offset != 0 && first_word + 1 < stride;
-
-                // TODO: It seems our current test suite only triggers for
-                // `Or`.
 
                 match op {
                     CombinationOperator::Or => {

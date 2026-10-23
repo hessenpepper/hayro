@@ -41,8 +41,8 @@ fn decode_context<'a>(
         bpc: dict_bpc,
         num_components: color_space.as_ref().map(|c| c.num_components()),
         target_dimension,
-        width: obj.width,
-        height: obj.height,
+        width: obj.width(),
+        height: obj.height(),
     };
 
     let decoded = obj
@@ -57,12 +57,12 @@ fn decode_context<'a>(
         .image_data
         .as_ref()
         .map(|d| {
-            scale_x = obj.width as f32 / d.width as f32;
-            scale_y = obj.height as f32 / d.height as f32;
+            scale_x = obj.width() as f32 / d.width as f32;
+            scale_y = obj.height() as f32 / d.height as f32;
 
             (d.width, d.height)
         })
-        .unwrap_or((obj.width, obj.height));
+        .unwrap_or((obj.width(), obj.height()));
 
     let color_space = color_space
         .or_else(|| {
@@ -196,7 +196,9 @@ fn decode_u8_samples(
                 .collect::<Option<Vec<_>>>()?,
         ),
         16 => Some(
-            data.chunks_exact(2)
+            data.as_chunks::<2>()
+                .0
+                .iter()
                 .enumerate()
                 .map(|(index, value)| {
                     decode_component(u16::from_be_bytes([value[0], value[1]]) as u32, index)
@@ -238,7 +240,9 @@ fn unpack_samples(
         }
         8 => Some(data.iter().map(|value| *value as u16).collect()),
         16 => Some(
-            data.chunks_exact(2)
+            data.as_chunks::<2>()
+                .0
+                .iter()
                 .map(|value| u16::from_be_bytes([value[0], value[1]]))
                 .collect(),
         ),

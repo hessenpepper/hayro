@@ -445,11 +445,10 @@ impl FontType {
         } else if let Some(cff) = CffFontBlob::new(data.clone()) {
             // It's a CFF font.
             Self::Cff(cff)
-        } else if let Some(t1) = Type1FontBlob::new(data) {
+        } else {
+            let t1 = Type1FontBlob::new(data)?;
             // It's a Type1 (PFB) font.
             Self::Type1(t1)
-        } else {
-            return None;
         };
 
         Some(parsed)
@@ -479,7 +478,7 @@ impl CidToGIdMap {
             let mut forward = FxHashMap::default();
             let mut inverse = FxHashMap::default();
 
-            for (cid, gid) in decoded.chunks_exact(2).enumerate() {
+            for (cid, gid) in decoded.as_chunks::<2>().0.iter().enumerate() {
                 let gid = GlyphId::new(u16::from_be_bytes([gid[0], gid[1]]) as u32);
 
                 forward.insert(cid as u16, gid);

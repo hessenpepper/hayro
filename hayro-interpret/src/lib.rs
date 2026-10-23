@@ -56,6 +56,7 @@ pub use function::{Function, TransferFunction};
 pub use hayro_cmap;
 pub use hayro_syntax;
 pub use interpret::*;
+pub use kurbo;
 pub use types::*;
 pub use util::{RectExt, TransformExt};
 pub use x_object::soft_mask::*;

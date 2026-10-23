@@ -22,6 +22,7 @@ use crate::sync::{Arc, FxHashMap, RwLock, RwLockExt};
 use crate::trivia::is_white_space_character;
 use crate::util::findr_needle;
 use crate::{PdfData, object};
+use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -130,11 +131,15 @@ fn fallback_xref_map_inner<'a>(
                             root_ref = last_obj_num;
                         }
 
-                        if let Some(stream) = old_r.read::<Stream<'_>>(&dummy_ctx)
-                            && dict.get::<Name<'_>>(TYPE).as_deref() == Some(b"ObjStm")
-                            && let Some(data) = stream.decoded().ok()
+                        if dict.get::<Name<'_>>(TYPE).as_deref() == Some(b"ObjStm")
+                            && {
+                                let mut after_dict = r.clone();
+                                after_dict.skip_white_spaces_and_comments();
+                                after_dict.forward_tag(b"stream").is_some()
+                            }
+                            && let Some(stream) = old_r.read::<Stream<'_>>(&dummy_ctx)
                             && let Some(last_obj_num) = last_obj_num
-                            && let Some(obj_stream) = ObjectStream::new(stream, &data, &dummy_ctx)
+                            && let Some(obj_stream) = ObjectStream::new(&stream)
                         {
                             for (idx, (obj_num, _)) in obj_stream.offsets.iter().enumerate() {
                                 let id = ObjectIdentifier::new(*obj_num as i32, 0);
@@ -206,11 +211,9 @@ fn fallback_xref_map_inner<'a>(
                             if let Some(stream) =
                                 reader.read_with_context::<IndirectObject<Stream<'_>>>(&dummy_ctx)
                                 && {
-                                    let stream = stream.get();
-                                    if let Some(data) = stream.decoded().ok()
-                                        && let Some(object_stream) =
-                                            ObjectStream::new(stream, &data, &dummy_ctx)
-                                        && let Some(obj) = object_stream.get::<Dict<'_>>(*idx)
+                                    if let Some(object_stream) = ObjectStream::new(&stream.get())
+                                        && let Some(obj) =
+                                            object_stream.get::<Dict<'_>>(*idx, &dummy_ctx)
                                     {
                                         check(&obj)
                                     } else {
@@ -381,16 +384,6 @@ impl XRef {
         Ok(xref)
     }
 
-    fn is_repaired(&self) -> bool {
-        match &self.0 {
-            Inner::Dummy => false,
-            Inner::Some(r) => {
-                let locked = r.map.get();
-                locked.repaired
-            }
-        }
-    }
-
     pub(crate) fn dummy() -> &'static Self {
         &DUMMY_XREF
     }
@@ -457,7 +450,7 @@ impl XRef {
 
                 // Try to yield in the order the objects appeared in the
                 // PDF.
-                elements.sort_by(|e1, e2| e1.1.cmp(&e2.1));
+                elements.sort_by_key(|e1| e1.1);
 
                 let mut iter = elements.into_iter();
 
@@ -482,8 +475,10 @@ impl XRef {
             unreachable!();
         };
 
-        let mut locked = r.map.try_put().unwrap();
-        assert!(!locked.repaired);
+        let mut locked = r.map.put();
+        if locked.repaired {
+            return;
+        }
 
         let (xref_map, _) = fallback_xref_map(r.data.get(), &r.password);
         locked.xref_map = xref_map;
@@ -541,17 +536,14 @@ impl XRef {
             return None;
         };
 
-        let locked = repr.map.try_get().unwrap();
+        // The flag must describe the map this entry came from.
+        let (entry, was_repaired) = {
+            let locked = repr.map.get();
+            // References to undefined objects are treated as null.
+            (*locked.xref_map.get(&id)?, locked.repaired)
+        };
 
         let mut r = Reader::new(repr.data.get().as_ref());
-
-        let entry = *locked.xref_map.get(&id).or({
-            // An indirect reference to an undefined object shall not be considered an error by a PDF processor; it
-            // shall be treated as a reference to the null object.
-            None
-        })?;
-        drop(locked);
-
         let mut ctx = ctx.clone();
         ctx.set_obj_number(id);
         ctx.set_in_content_stream(false);
@@ -574,7 +566,7 @@ impl XRef {
                 };
 
                 // The xref table is broken, try to repair if not already repaired.
-                if self.is_repaired() {
+                if was_repaired {
                     error!(
                         "attempt was made at repairing xref, but object {id:?} still couldn't be read"
                     );
@@ -593,16 +585,28 @@ impl XRef {
                 // Generation number is implicitly 0.
                 let obj_stream_id = ObjectIdentifier::new(obj_stram_gen_num as i32, 0);
 
-                if obj_stream_id == id {
+                if obj_stream_id == id || ctx.parent_chain_contains(&id) {
                     warn!("cycle detected in object stream");
 
                     return None;
                 }
 
-                let stream = self.get_with::<Stream<'_>>(obj_stream_id, &ctx)?;
-                let data = repr.data.get_with(obj_stream_id, &ctx)?;
-                let object_stream = ObjectStream::new(stream, data, &ctx)?;
-                object_stream.get(index)
+                // An object stream is a stream, so it can't itself be stored in an object
+                // stream (ISO 32000-2, 7.5.7).
+                if !matches!(
+                    repr.map.get().xref_map.get(&obj_stream_id),
+                    Some(EntryType::Normal(_))
+                ) {
+                    warn!("object stream {obj_stream_id:?} is not a top-level object");
+
+                    return None;
+                }
+
+                ctx.parent_chain_push(id);
+
+                repr.data
+                    .object_stream(obj_stream_id, &ctx)?
+                    .get(index, &ctx)
             }
         }
     }
@@ -1043,16 +1047,22 @@ fn get_decryptor(trailer_dict: &Dict<'_>, password: &[u8]) -> Result<Decryptor, 
     }
 }
 
-struct ObjectStream<'a> {
-    data: &'a [u8],
-    ctx: ReaderContext<'a>,
+pub(crate) struct ObjectStream {
+    data: Vec<u8>,
     offsets: Vec<(u32, usize)>,
 }
 
-impl<'a> ObjectStream<'a> {
-    fn new(inner: Stream<'_>, data: &'a [u8], ctx: &ReaderContext<'a>) -> Option<Self> {
-        let num_objects = inner.dict().get::<usize>(N)?;
-        let first_offset = inner.dict().get::<usize>(FIRST)?;
+impl ObjectStream {
+    pub(crate) fn new(stream: &Stream<'_>) -> Option<Self> {
+        let data = stream.decoded().ok()?.into_owned();
+        let offsets = Self::read_offsets(stream, &data).unwrap_or_default();
+
+        Some(Self { data, offsets })
+    }
+
+    fn read_offsets(stream: &Stream<'_>, data: &[u8]) -> Option<Vec<(u32, usize)>> {
+        let num_objects = stream.dict().get::<usize>(N)?;
+        let first_offset = stream.dict().get::<usize>(FIRST)?;
 
         let mut r = Reader::new(data);
 
@@ -1067,22 +1077,22 @@ impl<'a> ObjectStream<'a> {
             offsets.push((obj_num, first_offset + relative_offset));
         }
 
-        let mut ctx = ctx.clone();
-        ctx.set_in_object_stream(true);
-
-        Some(Self { data, ctx, offsets })
+        Some(offsets)
     }
 
-    fn get<T>(&self, index: u32) -> Option<T>
+    fn get<'a, T>(&'a self, index: u32, ctx: &ReaderContext<'a>) -> Option<T>
     where
         T: ObjectLike<'a>,
     {
         let offset = self.offsets.get(index as usize)?.1;
-        let mut r = Reader::new(self.data);
+        let mut r = Reader::new(&self.data);
         r.jump(offset);
         r.skip_white_spaces_and_comments();
 
-        r.read_with_context::<T>(&self.ctx)
+        let mut ctx = ctx.clone();
+        ctx.set_in_object_stream(true);
+
+        r.read_with_context::<T>(&ctx)
     }
 }
 
@@ -1096,22 +1106,22 @@ fn parse_metadata(info_dict: &Dict<'_>) -> Metadata {
             .and_then(|c| DateTime::from_bytes(&c)),
         title: info_dict
             .get::<object::String<'_>>(TITLE)
-            .map(|t| t.to_vec()),
+            .map(|t| Box::from(t.as_bytes())),
         author: info_dict
             .get::<object::String<'_>>(AUTHOR)
-            .map(|t| t.to_vec()),
+            .map(|t| Box::from(t.as_bytes())),
         subject: info_dict
             .get::<object::String<'_>>(SUBJECT)
-            .map(|t| t.to_vec()),
+            .map(|t| Box::from(t.as_bytes())),
         keywords: info_dict
             .get::<object::String<'_>>(KEYWORDS)
-            .map(|t| t.to_vec()),
+            .map(|t| Box::from(t.as_bytes())),
         creator: info_dict
             .get::<object::String<'_>>(CREATOR)
-            .map(|t| t.to_vec()),
+            .map(|t| Box::from(t.as_bytes())),
         producer: info_dict
             .get::<object::String<'_>>(PRODUCER)
-            .map(|t| t.to_vec()),
+            .map(|t| Box::from(t.as_bytes())),
     }
 }
 

@@ -147,6 +147,8 @@ pub(crate) fn decode(
 
     let retained_contexts = if ctx.header.flags.bitmap_context_retained {
         Some(RetainedContexts {
+            template: ctx.header.flags.template,
+            refinement_template: ctx.header.flags.refinement_template,
             generic_region: ctx.a_ctx.generic_region_contexts,
             refinement_region: ctx.a_ctx.refinement_region_contexts,
         })
@@ -162,6 +164,8 @@ pub(crate) fn decode(
 
 #[derive(Debug, Clone)]
 pub(crate) struct RetainedContexts {
+    pub(crate) template: Template,
+    pub(crate) refinement_template: RefinementTemplate,
     pub(crate) generic_region: Vec<ArithmeticDecoderContext>,
     pub(crate) refinement_region: Vec<ArithmeticDecoderContext>,
 }
@@ -321,10 +325,14 @@ fn decode_aggregation_bitmap(
     let symbol_code_length = 32 - (ctx.total_symbols() - 1).leading_zeros();
 
     let symbol_id_table = if use_huffman {
-        Some(HuffmanTable::build_uniform(
-            ctx.total_symbols(),
-            symbol_code_length,
-        )?)
+        if ctx.h_ctx.aggregation_symbol_codes.is_none() {
+            ctx.h_ctx.aggregation_symbol_codes = Some(HuffmanTable::build_uniform(
+                ctx.total_symbols(),
+                symbol_code_length.max(1),
+            )?);
+        }
+
+        ctx.h_ctx.aggregation_symbol_codes.clone()
     } else {
         None
     };
@@ -336,8 +344,8 @@ fn decode_aggregation_bitmap(
             delta_t_table: 0,
             refinement_width_table: 1,
             refinement_height_table: 1,
-            refinement_y_table: 1,
             refinement_x_table: 1,
+            refinement_y_table: 1,
             refinement_size_table: 0,
         })
     } else {
@@ -351,7 +359,6 @@ fn decode_aggregation_bitmap(
             x_location: 0,
             y_location: 0,
             combination_operator: CombinationOperator::Or,
-            _colour_extension: false,
         },
         flags: TextRegionFlags {
             use_huffman,
@@ -370,10 +377,17 @@ fn decode_aggregation_bitmap(
         symbol_id_table,
         segment_data_len: ctx.header.data.len(),
         data: &[], // Data comes from parent decoder context, not the header.
+        strict: ctx.header.strict,
     };
 
     let decode_ctx = if use_huffman {
-        DecodeContext::new_huffman(&mut ctx.h_ctx.reader, &header, &[], ctx.standard_tables)?
+        DecodeContext::new_huffman(
+            &mut ctx.h_ctx.reader,
+            &header,
+            &[],
+            ctx.standard_tables,
+            &mut ctx.a_ctx.refinement_region_contexts,
+        )?
     } else {
         let contexts = ctx
             .a_ctx
@@ -474,6 +488,16 @@ impl<'a> ArithmeticContext<'a> {
         let (generic_region_contexts, refinement_region_contexts) =
             if header.flags.bitmap_context_used {
                 let ctx = input_contexts.ok_or(SymbolError::Invalid)?;
+
+                // "The values of [...] SDTEMPLATE, SDRTEMPLATE [...] must match the
+                // corresponding values from the symbol dictionary whose context
+                // values are being used." (7.4.2.2)
+                if ctx.template != header.flags.template
+                    || ctx.refinement_template != header.flags.refinement_template
+                {
+                    bail!(SymbolError::Invalid);
+                }
+
                 (ctx.generic_region.clone(), ctx.refinement_region.clone())
             } else {
                 let template = header.flags.template;
@@ -509,6 +533,9 @@ struct HuffmanContext<'a> {
     /// `SDHUFFAGGINST`
     aggregation_instance_count_table: &'a HuffmanTable,
     export_run_length_table: &'a HuffmanTable,
+    /// The symbol ID codes of aggregations (6.5.8.2.3), which are the same
+    /// for all of them.
+    aggregation_symbol_codes: Option<HuffmanTable>,
     reader: Reader<'a>,
 }
 
@@ -567,6 +594,7 @@ impl<'a> HuffmanContext<'a> {
             collective_bitmap_size_table,
             aggregation_instance_count_table,
             export_run_length_table,
+            aggregation_symbol_codes: None,
         })
     }
 }
@@ -614,7 +642,7 @@ fn decode_height_class_collective_bitmap(ctx: &mut SymbolDecodeContext<'_>) -> R
             .ok_or(ParseError::UnexpectedEof)?;
 
         let mut bitmap = Bitmap::new(ctx.total_width, ctx.height_class_height)?;
-        decode_bitmap_mmr(&mut bitmap, bitmap_data)?;
+        decode_bitmap_mmr(&mut bitmap, bitmap_data, ctx.header.strict)?;
         bitmap
     };
 
@@ -745,10 +773,14 @@ pub(crate) struct SymbolDictionaryHeader<'a> {
     pub(crate) num_exported_symbols: u32,
     pub(crate) num_new_symbols: u32,
     pub(crate) data: &'a [u8],
+    pub(crate) strict: bool,
 }
 
 /// Parse a symbol dictionary segment header (7.4.2.1).
-pub(crate) fn parse<'a>(reader: &mut Reader<'a>) -> Result<SymbolDictionaryHeader<'a>> {
+pub(crate) fn parse<'a>(
+    reader: &mut Reader<'a>,
+    strict: bool,
+) -> Result<SymbolDictionaryHeader<'a>> {
     let flags_word = reader.read_u16().ok_or(ParseError::UnexpectedEof)?;
     let use_huffman = flags_word & 0x0001 != 0;
     let use_refagg = flags_word & 0x0002 != 0;
@@ -798,7 +830,7 @@ pub(crate) fn parse<'a>(reader: &mut Reader<'a>) -> Result<SymbolDictionaryHeade
     };
 
     let at_pixels = if !use_huffman {
-        parse_adaptive_template_pixels(reader, template, false)?
+        parse_adaptive_template_pixels(reader, template)?
     } else {
         // Unused.
         [AdaptiveTemplatePixel::default(); 4]
@@ -826,5 +858,6 @@ pub(crate) fn parse<'a>(reader: &mut Reader<'a>) -> Result<SymbolDictionaryHeade
         num_exported_symbols,
         num_new_symbols,
         data,
+        strict,
     })
 }

@@ -1,4 +1,4 @@
-// Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
+// Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25; changed by claude-opus-5-5 (medium effort, orchestrator), 2026-10-22: upstream merge
 //! A display list (Signal Path's `signalpath` branch; not upstream hayro).
 //!
 //! [`render`](crate::render) interprets the whole page again for every call and draws every
@@ -17,7 +17,7 @@
 //! replays render the region directly instead. That is always correct, only slower.
 
 use crate::image::{Decoded, DecodedImage};
-use crate::{GlobalState, RenderCache, Renderer};
+use crate::{GlobalState, RenderCache, RenderSettings, Renderer};
 use hayro_interpret::font::Glyph;
 use hayro_interpret::hayro_syntax::page::Page;
 use hayro_interpret::util::RectExt;
@@ -28,8 +28,8 @@ use hayro_interpret::{
 use kurbo::{Affine, BezPath, Rect, Shape};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
-use vello_cpu::Pixmap;
 use vello_cpu::color::{AlphaColor, Srgb};
+use vello_cpu::{Pixmap, RenderContext};
 
 enum Item {
     Path(BezPath, Affine, [u8; 4], BlendMode, DrawMode),
@@ -155,8 +155,9 @@ impl DisplayList {
             .transform_rect_bbox(Rect::new(0.0, 0.0, width as f64, height as f64))
             .inflate(px, px);
         let cache = RenderCache::new();
-        let global = GlobalState::new(&cache);
-        let mut device = Renderer::new(width, height, vc_settings(), &global);
+        let global = GlobalState::new(&cache, &RenderSettings::default());
+        let mut ctx = RenderContext::new_with(width, height, vc_settings());
+        let mut device = Renderer::new(&mut ctx, &global);
         let mut crop = self.crop.clone();
         crop.apply_affine(transform);
         device.push_clip_path(&ClipPath {
@@ -204,7 +205,7 @@ impl DisplayList {
             }
         }
         device.pop_clip();
-        Some(finish(device, width, height, background))
+        Some(finish(&mut ctx, background))
     }
 }
 
@@ -215,10 +216,11 @@ fn vc_settings() -> vello_cpu::RenderSettings {
     }
 }
 
-fn finish(device: Renderer<'_>, width: u16, height: u16, background: AlphaColor<Srgb>) -> Pixmap {
-    let mut pixmap = Pixmap::new(width, height);
+fn finish(ctx: &mut RenderContext, background: AlphaColor<Srgb>) -> Pixmap {
+    ctx.flush();
+    let mut pixmap = Pixmap::new(ctx.width(), ctx.height());
     let mut resources = vello_cpu::Resources::default();
-    device.ctx.render_with(
+    ctx.render_with(
         &mut pixmap,
         &mut resources,
         vello_cpu::RasterizerSettings {
@@ -250,8 +252,9 @@ pub fn render_region(
         page.xref(),
         settings.clone(),
     );
-    let global = GlobalState::new(&cache);
-    let mut device = Renderer::new(width, height, vc_settings(), &global);
+    let global = GlobalState::new(&cache, &RenderSettings::default());
+    let mut ctx = RenderContext::new_with(width, height, vc_settings());
+    let mut device = Renderer::new(&mut ctx, &global);
     let mut clip = page.intersected_crop_box().to_kurbo().to_path(0.1);
     clip.apply_affine(transform);
     device.push_clip_path(&ClipPath {
@@ -270,7 +273,7 @@ pub fn render_region(
         }
     }
     device.pop_clip();
-    Some(finish(device, width, height, background))
+    Some(finish(&mut ctx, background))
 }
 
 /// Passes everything through until `cancelled` returns true; after that only the clip and

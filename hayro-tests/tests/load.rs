@@ -4,7 +4,8 @@ use hayro_jbig2::DecoderContext;
 use hayro_jpeg2000::{DecodeSettings, Image};
 use hayro_syntax::Pdf;
 use hayro_syntax::metadata::Metadata;
-use hayro_syntax::object::DateTime;
+use hayro_syntax::object::{DateTime, Dict, ObjectIdentifier};
+use std::sync::Barrier;
 
 fn load_pdf(file: &[u8]) {
     let pdf = Pdf::new(file.to_vec());
@@ -22,9 +23,11 @@ fn load_jbig2(file: &[u8]) {
         fn next_line(&mut self) {}
     }
 
-    if let Ok(image) = hayro_jbig2::Image::new(file) {
+    if let Ok(file) = hayro_jbig2::File::new(file, &hayro_jbig2::DecodeSettings::default()) {
         let mut ctx = DecoderContext::default();
-        let _ = image.decode_with(&mut NullDecoder, &mut ctx);
+        for page in file.pages() {
+            let _ = page.decode_with(&mut NullDecoder, &mut ctx);
+        }
     }
 }
 
@@ -667,11 +670,11 @@ fn metadata_in_object_stream() {
             utc_offset_hour: 1,
             utc_offset_minute: 0,
         }),
-        title: Some("Encrypted Metadata".as_bytes().to_vec()),
-        author: Some("Max Mustermann".as_bytes().to_vec()),
+        title: Some(Box::from(b"Encrypted Metadata".as_slice())),
+        author: Some(Box::from(b"Max Mustermann".as_slice())),
         subject: None,
         keywords: None,
-        creator: Some("Typst 0.14.0".as_bytes().to_vec()),
+        creator: Some(Box::from(b"Typst 0.14.0".as_slice())),
         producer: None,
     };
 
@@ -739,7 +742,162 @@ fn issue1321() {
 }
 
 #[test]
+fn issue1392() {
+    let file = include_bytes!("../pdfs/load/issue1392.pdf");
+    load_pdf(file);
+}
+
+#[test]
 fn encrypted_oob_length() {
     let file = include_bytes!("../pdfs/load/encrypted_oob_length.pdf");
     load_pdf(file);
+}
+
+#[test]
+fn deeply_nested_page_tree() {
+    let file = include_bytes!("../pdfs/load/deeply_nested_page_tree.pdf");
+    load_pdf(file);
+}
+
+#[test]
+fn nested_object_streams() {
+    let file = include_bytes!("../pdfs/load/nested_object_streams.pdf");
+    load_pdf(file);
+}
+
+#[test]
+fn page_tree_cycle_with_siblings() {
+    let file = include_bytes!("../pdfs/load/page_tree_cycle_with_siblings.pdf");
+    load_pdf(file);
+}
+
+#[test]
+fn object_stream_cycle() {
+    let file = include_bytes!("../pdfs/load/object_stream_cycle.pdf");
+    load_pdf(file);
+}
+
+#[test]
+fn object_stream_lookups() {
+    let file = include_bytes!("../pdfs/load/object_stream_lookups.pdf");
+    load_pdf(file);
+}
+
+#[test]
+fn separation_tint_one_output() {
+    let file = include_bytes!("../pdfs/load/separation_tint_one_output.pdf");
+    load_pdf(file);
+}
+
+#[test]
+fn separation_tint_varying_outputs() {
+    let file = include_bytes!("../pdfs/load/separation_tint_varying_outputs.pdf");
+    load_pdf(file);
+}
+
+#[test]
+fn device_n_tint_one_output() {
+    let file = include_bytes!("../pdfs/load/device_n_tint_one_output.pdf");
+    load_pdf(file);
+}
+
+#[test]
+fn shading_pattern_color_space() {
+    let file = include_bytes!("../pdfs/load/shading_pattern_color_space.pdf");
+    load_pdf(file);
+}
+
+#[test]
+fn concurrent_object_stream_resolution() {
+    let data = include_bytes!("../pdfs/load/concurrent_object_streams.pdf");
+
+    for _ in 0..32 {
+        let pdf = Pdf::new(data.to_vec()).unwrap();
+        let barrier = Barrier::new(8);
+
+        std::thread::scope(|scope| {
+            for thread in 0..8 {
+                let pdf = &pdf;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+
+                    // Objects 6..30 are split between two compressed object streams.
+                    for offset in 0..24 {
+                        let number = 6 + (thread * 12 + offset) % 24;
+                        let value = pdf
+                            .xref()
+                            .get::<Dict<'_>>(ObjectIdentifier::new(number, 0))
+                            .and_then(|dict| dict.get::<i32>(b"V"));
+                        assert_eq!(value, Some(100 + number));
+                    }
+                });
+            }
+        });
+    }
+}
+
+#[test]
+fn concurrent_xref_repair_does_not_panic() {
+    let data = include_bytes!("../pdfs/load/concurrent_xref_repair.pdf");
+
+    for _ in 0..32 {
+        let pdf = Pdf::new(data.to_vec()).unwrap();
+        let barrier = Barrier::new(8);
+
+        std::thread::scope(|scope| {
+            for thread in 0..8 {
+                let pdf = &pdf;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+
+                    if thread % 2 == 0 {
+                        let _ = pdf
+                            .xref()
+                            .get::<Dict<'_>>(ObjectIdentifier::new(3 + thread, 0));
+                    } else {
+                        // The catalog's offset is valid even before repair.
+                        assert!(pdf.xref().get::<Dict<'_>>(pdf.xref().root_id()).is_some());
+                    }
+                });
+            }
+        });
+
+        let value = pdf
+            .xref()
+            .get::<Dict<'_>>(ObjectIdentifier::new(3, 0))
+            .and_then(|dict| dict.get::<i32>(b"V"));
+        assert_eq!(value, Some(103));
+    }
+}
+
+#[test]
+fn concurrent_xref_repair_retries_original_entries() {
+    let data = include_bytes!("../pdfs/load/concurrent_xref_repair.pdf");
+
+    for _ in 0..32 {
+        let pdf = Pdf::new(data.to_vec()).unwrap();
+        let barrier = Barrier::new(8);
+
+        std::thread::scope(|scope| {
+            for thread in 0..8 {
+                let pdf = &pdf;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+
+                    // Objects 3..11 have incorrect xref offsets.
+                    for offset in 0..8 {
+                        let number = 3 + (thread + offset) % 8;
+                        let value = pdf
+                            .xref()
+                            .get::<Dict<'_>>(ObjectIdentifier::new(number, 0))
+                            .and_then(|dict| dict.get::<i32>(b"V"));
+                        assert_eq!(value, Some(100 + number));
+                    }
+                });
+            }
+        });
+    }
 }

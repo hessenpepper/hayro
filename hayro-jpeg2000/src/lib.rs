@@ -144,7 +144,7 @@ pub struct Image<'a> {
     /// The codestream containing the data to decode.
     pub(crate) codestream: &'a [u8],
     /// The header of the J2C codestream.
-    pub(crate) header: Header<'a>,
+    pub(crate) header: Header,
     /// The JP2 boxes of the image. In the case of a raw codestream, we
     /// will synthesize the necessary boxes.
     pub(crate) boxes: ImageBoxes,
@@ -230,7 +230,7 @@ impl<'a> Image<'a> {
                         }),
                 )
                 .collect::<Vec<_>>();
-            components.sort_by(|c1, c2| c1.1.cmp(&c2.1));
+            components.sort_by_key(|c1| c1.1);
             *decoded_image.decoded_components = components.into_iter().map(|c| c.0).collect();
         }
 
@@ -244,7 +244,7 @@ impl<'a> Image<'a> {
 
 pub(crate) fn resolve_alpha_and_color_space(
     boxes: &ImageBoxes,
-    header: &Header<'_>,
+    header: &Header,
     settings: &DecodeSettings,
 ) -> Result<(ColorSpace, bool)> {
     let mut num_components = header.component_infos.len();
@@ -299,7 +299,10 @@ pub(crate) fn resolve_alpha_and_color_space(
                     color_space = ColorSpace::CMYK;
                 }
             } else {
-                bail!(ValidationError::TooManyChannels);
+                color_space = ColorSpace::Unknown {
+                    num_channels: u8::try_from(actual_num_components - usize::from(has_alpha))
+                        .map_err(|_| ValidationError::TooManyChannels)?,
+                };
             }
         }
     }
@@ -418,7 +421,7 @@ fn interleave_and_convert(image: &DecodedImage<'_>, buf: &mut [u8]) {
                     components[0]
                         .container
                         .iter()
-                        .map(|v| math::round_f32(*v) as u8),
+                        .map(|v| math::round_to_u8(*v)),
                 ) {
                     *output = input;
                 }
@@ -432,8 +435,8 @@ fn interleave_and_convert(image: &DecodedImage<'_>, buf: &mut [u8]) {
                 let c1 = &c1.container[..max_len];
 
                 for i in 0..max_len {
-                    *output_iter.next().unwrap() = math::round_f32(c0[i]) as u8;
-                    *output_iter.next().unwrap() = math::round_f32(c1[i]) as u8;
+                    *output_iter.next().unwrap() = math::round_to_u8(c0[i]);
+                    *output_iter.next().unwrap() = math::round_to_u8(c1[i]);
                 }
             }
             // RGB
@@ -447,9 +450,9 @@ fn interleave_and_convert(image: &DecodedImage<'_>, buf: &mut [u8]) {
                 let c2 = &c2.container[..max_len];
 
                 for i in 0..max_len {
-                    *output_iter.next().unwrap() = math::round_f32(c0[i]) as u8;
-                    *output_iter.next().unwrap() = math::round_f32(c1[i]) as u8;
-                    *output_iter.next().unwrap() = math::round_f32(c2[i]) as u8;
+                    *output_iter.next().unwrap() = math::round_to_u8(c0[i]);
+                    *output_iter.next().unwrap() = math::round_to_u8(c1[i]);
+                    *output_iter.next().unwrap() = math::round_to_u8(c2[i]);
                 }
             }
             // RGBA or CMYK.
@@ -465,10 +468,10 @@ fn interleave_and_convert(image: &DecodedImage<'_>, buf: &mut [u8]) {
                 let c3 = &c3.container[..max_len];
 
                 for i in 0..max_len {
-                    *output_iter.next().unwrap() = math::round_f32(c0[i]) as u8;
-                    *output_iter.next().unwrap() = math::round_f32(c1[i]) as u8;
-                    *output_iter.next().unwrap() = math::round_f32(c2[i]) as u8;
-                    *output_iter.next().unwrap() = math::round_f32(c3[i]) as u8;
+                    *output_iter.next().unwrap() = math::round_to_u8(c0[i]);
+                    *output_iter.next().unwrap() = math::round_to_u8(c1[i]);
+                    *output_iter.next().unwrap() = math::round_to_u8(c2[i]);
+                    *output_iter.next().unwrap() = math::round_to_u8(c3[i]);
                 }
             }
             _ => unreachable!(),
@@ -479,10 +482,10 @@ fn interleave_and_convert(image: &DecodedImage<'_>, buf: &mut [u8]) {
 
         for sample in 0..max_len {
             for channel in components.iter() {
-                *output_iter.next().unwrap() = math::round_f32(
+                *output_iter.next().unwrap() = math::round_to_u8(
                     (channel.container[sample] / ((1_u32 << channel.bit_depth) - 1) as f32)
                         * mul_factor,
-                ) as u8;
+                );
             }
         }
     }
@@ -506,6 +509,11 @@ fn convert_color_space(image: &mut DecodedImage<'_>, bit_depth: u8) -> Result<()
                     cielab_to_rgb(simd, image.decoded_components, bit_depth, cielab)
                 })?;
             }
+            EnumeratedColorspace::Ycck => {
+                dispatch!(Level::new(), simd => {
+                    ycck_to_cmyk(simd, image.decoded_components, bit_depth)
+                })?;
+            }
             _ => {}
         }
     }
@@ -522,7 +530,7 @@ fn get_color_space(boxes: &ImageBoxes, num_components: usize) -> Result<ColorSpa
     {
         jp2::colr::ColorSpace::Enumerated(e) => {
             match e {
-                EnumeratedColorspace::Cmyk => ColorSpace::CMYK,
+                EnumeratedColorspace::Cmyk | EnumeratedColorspace::Ycck => ColorSpace::CMYK,
                 EnumeratedColorspace::Srgb => ColorSpace::RGB,
                 EnumeratedColorspace::RommRgb => {
                     // Use an ICC profile to process the RommRGB color space.
@@ -560,7 +568,8 @@ fn get_color_space(boxes: &ImageBoxes, num_components: usize) -> Result<ColorSpa
             3 => ColorSpace::RGB,
             4 => ColorSpace::CMYK,
             _ => ColorSpace::Unknown {
-                num_channels: num_components as u8,
+                num_channels: u8::try_from(num_components)
+                    .map_err(|_| ValidationError::TooManyChannels)?,
             },
         },
     };
@@ -578,6 +587,7 @@ fn resolve_palette_indices(
     };
 
     let mapping = boxes.component_mapping.as_ref().unwrap();
+    let max_index = palette.entries.len() as i64 - 1;
     let mut resolved = Vec::with_capacity(mapping.entries.len());
 
     for entry in &mapping.entries {
@@ -599,7 +609,8 @@ fn resolve_palette_indices(
                     Vec::with_capacity(component.container.truncated().len() + SIMD_WIDTH);
 
                 for &sample in component.container.truncated() {
-                    let index = math::round_f32(sample) as i64;
+                    // Lossy decoding can reconstruct indices outside the palette.
+                    let index = ((sample + 0.5) as i64).clamp(0, max_index);
                     let value = palette
                         .map(index as usize, column_idx)
                         .ok_or(ColorError::PaletteResolutionFailed)?;
@@ -689,9 +700,11 @@ fn cielab_to_rgb<S: Simd>(
     // We leave applying the ICC profile to the user.
     for ((l_chunk, a_chunk), b_chunk) in l
         .container
-        .chunks_exact_mut(SIMD_WIDTH)
-        .zip(a.container.chunks_exact_mut(SIMD_WIDTH))
-        .zip(b.container.chunks_exact_mut(SIMD_WIDTH))
+        .as_chunks_mut::<SIMD_WIDTH>()
+        .0
+        .iter_mut()
+        .zip(a.container.as_chunks_mut::<SIMD_WIDTH>().0)
+        .zip(b.container.as_chunks_mut::<SIMD_WIDTH>().0)
     {
         let l_v = f32x8::from_slice(simd, l_chunk);
         let a_v = f32x8::from_slice(simd, a_chunk);
@@ -706,6 +719,26 @@ fn cielab_to_rgb<S: Simd>(
 }
 
 #[inline(always)]
+fn ycck_to_cmyk<S: Simd>(simd: S, components: &mut [ComponentData], bit_depth: u8) -> Result<()> {
+    // Convert YCbCr to CMY, preserving K (T.801, Table M.25).
+    sycc_to_rgb(simd, components, bit_depth)?;
+
+    let max_value = ((1_u32 << bit_depth) - 1) as f32;
+    let max_v = f32x8::splat(simd, max_value);
+
+    for component in components.iter_mut().take(3) {
+        let (chunks, remainder) = component.container.as_chunks_mut::<SIMD_WIDTH>();
+        for chunk in chunks {
+            (max_v - f32x8::from_slice(simd, chunk)).store(chunk);
+        }
+        for value in remainder {
+            *value = max_value - *value;
+        }
+    }
+
+    Ok(())
+}
+
 fn sycc_to_rgb<S: Simd>(simd: S, components: &mut [ComponentData], bit_depth: u8) -> Result<()> {
     let offset = (1_u32 << (bit_depth as u32 - 1)) as f32;
     let max_value = ((1_u32 << bit_depth as u32) - 1) as f32;
@@ -728,9 +761,11 @@ fn sycc_to_rgb<S: Simd>(simd: S, components: &mut [ComponentData], bit_depth: u8
 
     for ((y_chunk, cb_chunk), cr_chunk) in y
         .container
-        .chunks_exact_mut(SIMD_WIDTH)
-        .zip(cb.container.chunks_exact_mut(SIMD_WIDTH))
-        .zip(cr.container.chunks_exact_mut(SIMD_WIDTH))
+        .as_chunks_mut::<SIMD_WIDTH>()
+        .0
+        .iter_mut()
+        .zip(cb.container.as_chunks_mut::<SIMD_WIDTH>().0)
+        .zip(cr.container.as_chunks_mut::<SIMD_WIDTH>().0)
     {
         let y_v = f32x8::from_slice(simd, y_chunk);
         let cb_v = f32x8::from_slice(simd, cb_chunk) - offset_v;

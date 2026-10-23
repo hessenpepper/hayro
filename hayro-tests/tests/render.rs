@@ -4,8 +4,11 @@ use crate::{run_render_test, run_render_test_with_password};
 #[test] fn OverlappingGlyphClipping() { run_render_test("OverlappingGlyphClipping", "pdfs/custom/OverlappingGlyphClipping.pdf", None); }
 #[test] fn TextClippingModeChanges() { run_render_test("TextClippingModeChanges", "pdfs/custom/TextClippingModeChanges.pdf", None); }
 #[test] fn annotation_checkbox() { run_render_test("annotation_checkbox", "pdfs/custom/annotation_checkbox.pdf", None); }
+#[test] fn annotation_no_view() { run_render_test("annotation_no_view", "pdfs/custom/annotation_no_view.pdf", None); }
+#[test] fn annotation_bbox_offset() { run_render_test("annotation_bbox_offset", "pdfs/custom/annotation_bbox_offset.pdf", None); }
 #[test] fn clip_path_evenodd() { run_render_test("clip_path_evenodd", "pdfs/custom/clip_path_evenodd.pdf", None); }
 #[test] fn clip_path_nested() { run_render_test("clip_path_nested", "pdfs/custom/clip_path_nested.pdf", None); }
+#[test] fn clip_path_painted() { run_render_test("clip_path_painted", "pdfs/custom/clip_path_painted.pdf", None); }
 #[test] fn color_separation_3() { run_render_test("color_separation_3", "pdfs/custom/color_separation_3.pdf", None); }
 #[test] fn color_space_icc_gray() { run_render_test("color_space_icc_gray", "pdfs/custom/color_space_icc_gray.pdf", None); }
 #[test] fn color_space_icc_invalid_profile() { run_render_test("color_space_icc_invalid_profile", "pdfs/custom/color_space_icc_invalid_profile.pdf", None); }
@@ -14,6 +17,7 @@ use crate::{run_render_test, run_render_test_with_password};
 #[test] fn color_space_lab() { run_render_test("color_space_lab", "pdfs/custom/color_space_lab.pdf", None); }
 #[test] fn color_space_separation_1() { run_render_test("color_space_separation_1", "pdfs/custom/color_space_separation_1.pdf", None); }
 #[test] fn color_space_separation_2() { run_render_test("color_space_separation_2", "pdfs/custom/color_space_separation_2.pdf", None); }
+#[test] fn fill_degenerate() { run_render_test("fill_degenerate", "pdfs/custom/fill_degenerate.pdf", None); }
 #[test] fn filter_flate_1bit() { run_render_test("filter_flate_1bit", "pdfs/custom/filter_flate_1bit.pdf", None); }
 #[test] fn filter_tiff_predictor_gray() { run_render_test("filter_tiff_predictor_gray", "pdfs/custom/filter_tiff_predictor_gray.pdf", None); }
 #[test] fn font_cid_1() { run_render_test("font_cid_1", "pdfs/custom/font_cid_1.pdf", None); }
@@ -61,6 +65,7 @@ use crate::{run_render_test, run_render_test_with_password};
 #[test] fn image_ccit_1() { run_render_test("image_ccit_1", "pdfs/custom/image_ccit_1.pdf", None); }
 #[test] fn image_ccit_3() { run_render_test("image_ccit_3", "pdfs/custom/image_ccit_3.pdf", None); }
 #[test] fn image_ccit_4() { run_render_test("image_ccit_4", "pdfs/custom/image_ccit_4.pdf", None); }
+#[test] fn image_ccitt_rows_above_height() { run_render_test("image_ccitt_rows_above_height", "pdfs/custom/image_ccitt_rows_above_height.pdf", None); }
 #[test] fn image_ccitt_rows_below_height() { run_render_test("image_ccitt_rows_below_height", "pdfs/custom/image_ccitt_rows_below_height.pdf", None); }
 #[test] fn image_cmyk_icc_jpg() { run_render_test("image_cmyk_icc_jpg", "pdfs/custom/image_cmyk_icc_jpg.pdf", None); }
 #[test] fn image_cmyk_jpg() { run_render_test("image_cmyk_jpg", "pdfs/custom/image_cmyk_jpg.pdf", None); }
@@ -80,6 +85,7 @@ use crate::{run_render_test, run_render_test_with_password};
 #[test] fn image_luma8_jpg() { run_render_test("image_luma8_jpg", "pdfs/custom/image_luma8_jpg.pdf", None); }
 #[test] fn image_mask() { run_render_test("image_mask", "pdfs/custom/image_mask.pdf", None); }
 #[test] fn image_mask_4() { run_render_test("image_mask_4", "pdfs/custom/image_mask_4.pdf", None); }
+#[test] fn image_mask_alpha() { run_render_test("image_mask_alpha", "pdfs/custom/image_mask_alpha.pdf", None); }
 #[test] fn image_mask_hairline() { run_render_test("image_mask_hairline", "pdfs/custom/image_mask_hairline.pdf", None); }
 #[test] fn image_mask_missing_bpc() { run_render_test("image_mask_missing_bpc", "pdfs/custom/image_mask_missing_bpc.pdf", None); }
 #[test] fn image_named_colorspace() { run_render_test("image_named_colorspace", "pdfs/custom/image_named_colorspace.pdf", None); }
@@ -92,6 +98,7 @@ use crate::{run_render_test, run_render_test_with_password};
 #[test] fn image_rgba16() { run_render_test("image_rgba16", "pdfs/custom/image_rgba16.pdf", None); }
 #[test] fn image_rgba8() { run_render_test("image_rgba8", "pdfs/custom/image_rgba8.pdf", None); }
 #[test] fn image_rgba8_icc() { run_render_test("image_rgba8_icc", "pdfs/custom/image_rgba8_icc.pdf", None); }
+#[test] fn image_smask_downscale() { run_render_test("image_smask_downscale", "pdfs/custom/image_smask_downscale.pdf", None); }
 #[test] fn integration_coat_of_arms() { run_render_test("integration_coat_of_arms", "pdfs/custom/integration_coat_of_arms.pdf", None); }
 #[test] fn integration_diagram() { run_render_test("integration_diagram", "pdfs/custom/integration_diagram.pdf", None); }
 #[test] fn integration_matplotlib() { run_render_test("integration_matplotlib", "pdfs/custom/integration_matplotlib.pdf", None); }
@@ -130,6 +137,7 @@ use crate::{run_render_test, run_render_test_with_password};
 #[test] fn path_rendering_8() { run_render_test("path_rendering_8", "pdfs/custom/path_rendering_8.pdf", None); }
 #[test] fn path_rendering_9() { run_render_test("path_rendering_9", "pdfs/custom/path_rendering_9.pdf", None); }
 #[test] fn path_rendering_dash_array_0_phase() { run_render_test("path_rendering_dash_array_0_phase", "pdfs/custom/path_rendering_dash_array_0_phase.pdf", None); }
+#[test] fn path_re_current_point() { run_render_test("path_re_current_point", "pdfs/custom/path_re_current_point.pdf", None); }
 #[test] fn pattern_shading_background() { run_render_test("pattern_shading_background", "pdfs/custom/pattern_shading_background.pdf", None); }
 #[test] fn pattern_shading_bbox() { run_render_test("pattern_shading_bbox", "pdfs/custom/pattern_shading_bbox.pdf", None); }
 #[test] fn pattern_shading_on_text() { run_render_test("pattern_shading_on_text", "pdfs/custom/pattern_shading_on_text.pdf", None); }
@@ -158,6 +166,7 @@ use crate::{run_render_test, run_render_test_with_password};
 #[test] fn pattern_shading_type5() { run_render_test("pattern_shading_type5", "downloads/custom/pattern_shading_type5.pdf", None); }
 #[test] fn pattern_shading_type6() { run_render_test("pattern_shading_type6", "downloads/custom/pattern_shading_type6.pdf", None); }
 #[test] fn pattern_shading_type6_2() { run_render_test("pattern_shading_type6_2", "pdfs/custom/pattern_shading_type6_2.pdf", None); }
+#[test] fn pattern_tiling_step() { run_render_test("pattern_tiling_step", "pdfs/custom/pattern_tiling_step.pdf", None); }
 #[test] fn rendering_conflation_artifacts() { run_render_test("rendering_conflation_artifacts", "pdfs/custom/rendering_conflation_artifacts.pdf", Some("2..=2")); }
 #[test] fn shading_operator_1() { run_render_test("shading_operator_1", "pdfs/custom/shading_operator_1.pdf", None); }
 #[test] fn shading_operator_2() { run_render_test("shading_operator_2", "pdfs/custom/shading_operator_2.pdf", None); }
@@ -178,6 +187,7 @@ use crate::{run_render_test, run_render_test_with_password};
 #[test] fn text_rendering_stroking_clipping() { run_render_test("text_rendering_stroking_clipping", "pdfs/custom/text_rendering_stroking_clipping.pdf", None); }
 #[test] fn text_stroked_complex_paint() { run_render_test("text_stroked_complex_paint", "pdfs/custom/text_stroked_complex_paint.pdf", None); }
 #[test] fn text_with_rise() { run_render_test("text_with_rise", "pdfs/custom/text_with_rise.pdf", None); }
+#[test] fn type3_shading_glyph() { run_render_test("type3_shading_glyph", "pdfs/custom/type3_shading_glyph.pdf", None); }
 #[test] fn xobject_1() { run_render_test("xobject_1", "pdfs/custom/xobject_1.pdf", None); }
 #[test] fn xobject_matrix() { run_render_test("xobject_matrix", "pdfs/custom/xobject_matrix.pdf", None); }
 #[test] fn xobject_with_fill_opacity() { run_render_test("xobject_with_fill_opacity", "pdfs/custom/xobject_with_fill_opacity.pdf", None); }
@@ -193,6 +203,7 @@ use crate::{run_render_test, run_render_test_with_password};
 #[test] fn font_type3_filled_glyphs() { run_render_test("font_type3_filled_glyphs", "pdfs/custom/font_type3_filled_glyphs.pdf", None); }
 #[test] fn font_type3_stroked_glyphs() { run_render_test("font_type3_stroked_glyphs", "pdfs/custom/font_type3_stroked_glyphs.pdf", None); }
 #[test] fn font_type3_shape_glyphs() { run_render_test("font_type3_shape_glyphs", "pdfs/custom/font_type3_shape_glyphs.pdf", None); }
+#[test] fn pattern_tiling_cache_key() { run_render_test("pattern_tiling_cache_key", "pdfs/custom/pattern_tiling_cache_key.pdf", None); }
 #[test] fn pattern_tiling_inner_transform() { run_render_test("pattern_tiling_inner_transform", "pdfs/custom/pattern_tiling_inner_transform.pdf", None); }
 #[test] fn pattern_tiling_large_x_step() { run_render_test("pattern_tiling_large_x_step", "pdfs/custom/pattern_tiling_large_x_step.pdf", None); }
 #[test] fn pattern_tiling_lines() { run_render_test("pattern_tiling_lines", "pdfs/custom/pattern_tiling_lines.pdf", None); }
@@ -230,6 +241,9 @@ use crate::{run_render_test, run_render_test_with_password};
 #[test] fn issue41() { run_render_test("issue41", "pdfs/custom/issue41.pdf", None); }
 #[test] fn mask_alpha() { run_render_test("mask_alpha", "pdfs/custom/mask_alpha.pdf", None); }
 #[test] fn mask_luminosity() { run_render_test("mask_luminosity", "pdfs/custom/mask_luminosity.pdf", None); }
+#[test] fn mask_no_cs() { run_render_test("mask_no_cs", "pdfs/custom/mask_no_cs.pdf", None); }
+#[test] fn mask_luminosity_no_cs() { run_render_test("mask_luminosity_no_cs", "pdfs/custom/mask_luminosity_no_cs.pdf", None); }
+#[test] fn mask_reuse() { run_render_test("mask_reuse", "pdfs/custom/mask_reuse.pdf", None); }
 #[test] fn resvg_masking_clipPath_mixed_clip_rule() { run_render_test("resvg_masking_clipPath_mixed_clip_rule", "pdfs/custom/resvg_masking_clipPath_mixed_clip_rule.pdf", None); }
 #[test] fn resvg_masking_clipPath_nested_clip_path() { run_render_test("resvg_masking_clipPath_nested_clip_path", "pdfs/custom/resvg_masking_clipPath_nested_clip_path.pdf", None); }
 #[test] fn resvg_masking_clipPath_overlapped_shapes_with_evenodd() { run_render_test("resvg_masking_clipPath_overlapped_shapes_with_evenodd", "pdfs/custom/resvg_masking_clipPath_overlapped_shapes_with_evenodd.pdf", None); }
@@ -298,6 +312,10 @@ use crate::{run_render_test, run_render_test_with_password};
 #[test] fn issue1023() { run_render_test("issue1023", "pdfs/custom/issue1023.pdf", None); }
 #[test] fn issue1276() { run_render_test("issue1276", "downloads/custom/issue1276.pdf", None); }
 #[test] fn issue1334() { run_render_test("issue1334", "downloads/custom/issue1334.pdf", Some("12..=12")); }
+#[test] fn deeply_nested_object() { run_render_test("deeply_nested_object", "pdfs/custom/deeply_nested_object.pdf", None); }
+#[test] fn pattern_tiling_uncolored_named_base() { run_render_test("pattern_tiling_uncolored_named_base", "pdfs/custom/pattern_tiling_uncolored_named_base.pdf", None); }
+#[test] fn image_inline_9() { run_render_test("image_inline_9", "pdfs/custom/image_inline_9.pdf", None); }
+#[test] fn image_inline_10() { run_render_test("image_inline_10", "pdfs/custom/image_inline_10.pdf", None); }
 #[test] fn pdfjs_20130226130259() { run_render_test("pdfjs_20130226130259", "downloads/pdfjs/20130226130259.pdf", Some("0..=0")); }
 #[test] fn pdfjs_ContentStreamNoCycleType3insideType3() { run_render_test("pdfjs_ContentStreamNoCycleType3insideType3", "downloads/pdfjs/ContentStreamNoCycleType3insideType3.pdf", None); }
 #[test] fn pdfjs_High_Pressure_Measurement_WP_001287() { run_render_test("pdfjs_High_Pressure_Measurement_WP_001287", "downloads/pdfjs/High-Pressure-Measurement-WP-001287.pdf", Some("2..=2")); }
@@ -879,6 +897,7 @@ use crate::{run_render_test, run_render_test_with_password};
 #[test] fn pdfjs_issue6127() { run_render_test("pdfjs_issue6127", "downloads/pdfjs/issue6127.pdf", Some("..=0")); }
 #[test] fn pdfjs_issue6286() { run_render_test("pdfjs_issue6286", "downloads/pdfjs/issue6286.pdf", None); }
 #[test] fn pdfjs_issue6410() { run_render_test("pdfjs_issue6410", "downloads/pdfjs/issue6410.pdf", None); }
+#[test] fn pdfjs_issue6692() { run_render_test("pdfjs_issue6692", "downloads/pdfjs/issue6692.pdf", Some("10..=10")); }
 #[test] fn pdfjs_issue6782() { run_render_test("pdfjs_issue6782", "downloads/pdfjs/issue6782.pdf", None); }
 #[test] fn pdfjs_issue7835() { run_render_test("pdfjs_issue7835", "downloads/pdfjs/issue7835.pdf", None); }
 #[test] fn pdfjs_issue8586() { run_render_test("pdfjs_issue8586", "downloads/pdfjs/issue8586.pdf", None); }

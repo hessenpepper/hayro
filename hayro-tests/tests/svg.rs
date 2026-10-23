@@ -22,6 +22,11 @@ fn image_rgba8() {
 }
 
 #[test]
+fn image_mask_alpha() {
+    run_svg_test("image_mask_alpha", "pdfs/custom/image_mask_alpha.pdf", None);
+}
+
+#[test]
 fn clip_path_evenodd() {
     run_svg_test(
         "clip_path_evenodd",
@@ -112,6 +117,15 @@ fn gradient_on_rotated_rect() {
     run_svg_test(
         "gradient_on_rotated_rect",
         "pdfs/custom/gradient_on_rotated_rect.pdf",
+        None,
+    );
+}
+
+#[test]
+fn pattern_tiling_cache_key() {
+    run_svg_test(
+        "pattern_tiling_cache_key",
+        "pdfs/custom/pattern_tiling_cache_key.pdf",
         None,
     );
 }
@@ -246,6 +260,25 @@ fn mask_bc() {
 }
 
 #[test]
+fn mask_no_cs() {
+    run_svg_test("mask_no_cs", "pdfs/custom/mask_no_cs.pdf", None);
+}
+
+#[test]
+fn mask_luminosity_no_cs() {
+    run_svg_test(
+        "mask_luminosity_no_cs",
+        "pdfs/custom/mask_luminosity_no_cs.pdf",
+        None,
+    );
+}
+
+#[test]
+fn mask_reuse() {
+    run_svg_test("mask_reuse", "pdfs/custom/mask_reuse.pdf", None);
+}
+
+#[test]
 fn pdfjs_issue11279() {
     run_svg_test("pdfjs_issue11279", "downloads/pdfjs/issue11279.pdf", None);
 }
@@ -267,4 +300,9 @@ fn issue_typst_7269() {
 #[test]
 fn issue_986() {
     run_svg_test("issue968", "pdfs/custom/issue968.pdf", None);
+}
+
+#[test]
+fn fill_degenerate() {
+    run_svg_test("fill_degenerate", "pdfs/custom/fill_degenerate.pdf", None);
 }

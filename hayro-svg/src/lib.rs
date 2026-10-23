@@ -142,7 +142,7 @@ impl<'a> SvgRenderer<'a> {
                     format!("translate({} {})", c[4] as f32, c[5] as f32)
                 }
                 _ => {
-                    format!("matrix({})", &convert_transform(&transform))
+                    format!("matrix({})", convert_transform(&transform))
                 }
             };
 

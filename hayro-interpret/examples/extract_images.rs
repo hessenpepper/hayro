@@ -7,10 +7,10 @@ use hayro_interpret::font::GlyphRun;
 use hayro_interpret::{
     BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image, ImageData, ImageDrawProps,
     InterpreterCache, InterpreterSettings, SoftMask, interpret_page,
+    kurbo::{Affine, BezPath, Rect},
 };
 use hayro_syntax::Pdf;
 use image::{DynamicImage, ImageBuffer};
-use kurbo::{Affine, BezPath, Rect};
 use std::path::PathBuf;
 
 fn main() {

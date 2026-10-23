@@ -53,12 +53,11 @@ use std::rc::Rc;
 
 pub use hayro_interpret;
 pub use hayro_interpret::hayro_syntax;
+pub use kurbo;
 pub use vello_cpu;
 
-use vello_cpu::color::AlphaColor;
-use vello_cpu::color::Srgb;
-use vello_cpu::color::palette::css::TRANSPARENT;
-use vello_cpu::color::palette::css::WHITE;
+use vello_cpu::color::palette::css::{TRANSPARENT, WHITE};
+use vello_cpu::color::{AlphaColor, Srgb};
 use vello_cpu::peniko::{Compose, Fill, Mix};
 use vello_cpu::{Mask, Pixmap, RenderContext, peniko};
 
@@ -76,49 +75,41 @@ pub(crate) struct GlobalState {
     level: Level,
     outline_cache: Rc<RefCell<FxHashMap<u128, Rc<BezPath>>>>,
     scaler: Scaler,
+    force_image_interpolation: bool,
 }
 
 impl GlobalState {
-    pub(crate) fn new(cache: &RenderCache<'_>) -> Self {
+    pub(crate) fn new(cache: &RenderCache<'_>, settings: &RenderSettings) -> Self {
         Self {
             level: Level::new(),
             outline_cache: cache.outline_cache.clone(),
             scaler: Scaler::new(image::RESAMPLING_FUNCTION),
+            force_image_interpolation: settings.force_image_interpolation,
         }
     }
 }
 
 pub(crate) struct Renderer<'a> {
     global: &'a GlobalState,
-    pub(crate) ctx: RenderContext,
+    pub(crate) ctx: &'a mut RenderContext,
     pub(crate) inside_pattern: bool,
     pub(crate) soft_mask_cache: FxHashMap<u128, Mask>,
     pub(crate) in_type3_glyph: bool,
 }
 
 impl<'r> Renderer<'r> {
-    pub(crate) fn new(
-        width: u16,
-        height: u16,
-        settings: vello_cpu::RenderSettings,
-        global: &'r GlobalState,
-    ) -> Self {
+    pub(crate) fn new(ctx: &'r mut RenderContext, global: &'r GlobalState) -> Self {
         Self {
             global,
-            ctx: RenderContext::new_with(width, height, settings),
+            ctx,
             inside_pattern: false,
             soft_mask_cache: FxHashMap::default(),
             in_type3_glyph: false,
         }
     }
 
-    fn child(&self, width: u16, height: u16) -> Self {
-        Self::new(
-            width,
-            height,
-            derive_settings(self.ctx.render_settings()),
-            self.global,
-        )
+    fn child_context(&self, width: u16, height: u16) -> RenderContext {
+        RenderContext::new_with(width, height, derive_settings(self.ctx.render_settings()))
     }
 
     fn apply_draw_props(&mut self, props: &DrawProps<'_>) {
@@ -204,72 +195,107 @@ impl<'a> RenderCache<'a> {
     }
 }
 
-/// Settings to apply during rendering.
-#[derive(Clone, Copy)]
+/// Settings for rendering a page.
+#[derive(Clone, Copy, Default)]
 pub struct RenderSettings {
-    /// How much the contents should be scaled into the x direction.
+    /// Whether all images should forcibly be rendered with bilinear interpolation.
+    pub force_image_interpolation: bool,
+}
+
+/// Settings for the output pixmap.
+#[derive(Clone, Copy)]
+pub struct PixmapSettings {
+    /// Horizontal scale factor.
     pub x_scale: f32,
-    /// How much the contents should be scaled into the y direction.
+    /// Vertical scale factor.
     pub y_scale: f32,
-    /// The width of the viewport. If this is set to `None`, the width will be chosen
-    /// automatically based on the scale factor and the dimensions of the PDF.
-    pub width: Option<u16>,
-    /// The height of the viewport. If this is set to `None`, the height will be chosen
-    /// automatically based on the scale factor and the dimensions of the PDF.
-    pub height: Option<u16>,
-    /// The background color used to initialize the output pixmap.
+    /// Background color.
     pub bg_color: AlphaColor<Srgb>,
 }
 
-impl Default for RenderSettings {
+impl Default for PixmapSettings {
     fn default() -> Self {
         Self {
             x_scale: 1.0,
             y_scale: 1.0,
-            width: None,
-            height: None,
             bg_color: TRANSPARENT,
         }
     }
 }
 
-/// Render the page with the given settings to a pixmap.
+/// Render a page to a pixmap with the given settings.
+///
+/// This is a "simplified" method in case all you want to achieve is rendering a
+/// page with a certain scale factor.
+///
+/// If you want to have more control over how exactly the page is rendered (e.g. with
+/// an arbitrary transform or into a custom pixel buffer), use [`render_into`]
 pub fn render<'a>(
     page: &'a Page<'a>,
     cache: &RenderCache<'a>,
     interpreter_settings: &InterpreterSettings,
     render_settings: &RenderSettings,
+    pixmap_settings: &PixmapSettings,
 ) -> Pixmap {
-    let (x_scale, y_scale) = (render_settings.x_scale, render_settings.y_scale);
     let (width, height) = page.render_dimensions();
-    let (scaled_width, scaled_height) = ((width * x_scale) as f64, (height * y_scale) as f64);
-    let initial_transform = Affine::scale_non_uniform(x_scale as f64, y_scale as f64)
-        * page.initial_transform(true).to_kurbo();
-
-    let (pix_width, pix_height) = (
-        render_settings.width.unwrap_or(scaled_width.floor() as u16),
-        render_settings
-            .height
-            .unwrap_or(scaled_height.floor() as u16),
+    let mut ctx = RenderContext::new(
+        (width * pixmap_settings.x_scale) as u16,
+        (height * pixmap_settings.y_scale) as u16,
     );
+    let transform = Affine::scale_non_uniform(
+        pixmap_settings.x_scale as f64,
+        pixmap_settings.y_scale as f64,
+    ) * page.initial_transform(true).to_kurbo();
+    render_into(
+        page,
+        cache,
+        interpreter_settings,
+        render_settings,
+        &mut ctx,
+        transform,
+    );
+    ctx.flush();
+
+    let mut pixmap = Pixmap::new(ctx.width(), ctx.height());
+    ctx.render_with(
+        &mut pixmap,
+        &mut vello_cpu::Resources::default(),
+        vello_cpu::RasterizerSettings {
+            target_init: vello_cpu::TargetInit::Clear(pixmap_settings.bg_color),
+            ..Default::default()
+        },
+    );
+    pixmap
+}
+
+/// Render a page into the given [`RenderContext`] with the
+/// given transform.
+///
+/// See the [following example](https://github.com/LaurenzV/hayro/blob/main/hayro/examples/render.rs)
+/// if you are unsure how to call this method.
+pub fn render_into<'a>(
+    page: &'a Page<'a>,
+    cache: &RenderCache<'a>,
+    interpreter_settings: &InterpreterSettings,
+    render_settings: &RenderSettings,
+    ctx: &mut RenderContext,
+    transform: Affine,
+) {
     let mut state = Context::new(
-        initial_transform,
-        Rect::new(0.0, 0.0, pix_width as f64, pix_height as f64),
+        transform,
+        Rect::new(0.0, 0.0, ctx.width() as f64, ctx.height() as f64),
         &cache.interpreter_cache,
         page.xref(),
         interpreter_settings.clone(),
     );
+    ctx.take_current_state();
+    ctx.reset_mask();
+    ctx.reset_filter_effect();
 
-    let vc_settings = vello_cpu::RenderSettings {
-        level: vello_cpu::Level::new(),
-        num_threads: 0,
-    };
-
-    let global = GlobalState::new(cache);
-    let mut device = Renderer::new(pix_width, pix_height, vc_settings, &global);
-
+    let global = GlobalState::new(cache, render_settings);
+    let mut device = Renderer::new(ctx, &global);
     let mut clip_path = page.intersected_crop_box().to_kurbo().to_path(0.1);
-    clip_path.apply_affine(initial_transform);
+    clip_path.apply_affine(transform);
     device.push_clip_path(&ClipPath {
         path: clip_path,
         fill: FillRule::NonZero,
@@ -278,19 +304,6 @@ pub fn render<'a>(
     interpret_page(page, &mut state, &mut device);
 
     device.pop_clip();
-
-    let mut pixmap = Pixmap::new(pix_width, pix_height);
-    let mut resources = vello_cpu::Resources::default();
-    device.ctx.render_with(
-        &mut pixmap,
-        &mut resources,
-        vello_cpu::RasterizerSettings {
-            target_init: vello_cpu::TargetInit::Clear(render_settings.bg_color),
-            ..Default::default()
-        },
-    );
-
-    pixmap
 }
 
 // Just a convenience method for testing.
@@ -315,11 +328,11 @@ pub fn render_pdf(
                 page,
                 &cache,
                 &settings,
-                &RenderSettings {
+                &RenderSettings::default(),
+                &PixmapSettings {
                     x_scale: scale,
                     y_scale: scale,
                     bg_color: WHITE,
-                    ..Default::default()
                 },
             );
 

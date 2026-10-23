@@ -9,17 +9,9 @@ use alloc::vec::Vec;
 
 use super::bitplane::{BitPlaneDecodeBuffers, BitPlaneDecodeContext};
 use super::build::{CodeBlock, Decomposition, Layer, Precinct, Segment, SubBand, SubBandType};
-use super::codestream::{
-    ComponentInfo, Header, ProgressionOrder, QuantizationStyle, WaveletTransform,
-};
+use super::codestream::{ComponentInfo, Header, QuantizationStyle, WaveletTransform};
 use super::idwt::IDWTOutput;
-use super::progression::{
-    IteratorInput, ProgressionData, component_position_resolution_layer_progression,
-    layer_resolution_component_position_progression,
-    position_component_resolution_layer_progression,
-    resolution_layer_component_position_progression,
-    resolution_position_component_layer_progression,
-};
+use super::progression::{ProgressionData, progression_iterator};
 use super::tag_tree::TagNode;
 use super::tile::{ComponentTile, ResolutionTile, Tile};
 use super::{ComponentData, bitplane, build, idwt, mct, segment, tile};
@@ -31,7 +23,7 @@ use core::ops::Range;
 
 pub(crate) fn decode<'a>(
     data: &'a [u8],
-    header: &'a Header<'a>,
+    header: &'a Header,
     ctx: &mut DecoderContext<'a>,
 ) -> Result<()> {
     let mut reader = BitReader::new(data);
@@ -53,29 +45,7 @@ pub(crate) fn decode<'a>(
             tile.rect.height(),
         );
 
-        let iter_input = IteratorInput::new(tile);
-
-        let progression_iterator: Box<dyn Iterator<Item = ProgressionData>> =
-            match tile.progression_order {
-                ProgressionOrder::LayerResolutionComponentPosition => {
-                    Box::new(layer_resolution_component_position_progression(iter_input))
-                }
-                ProgressionOrder::ResolutionLayerComponentPosition => {
-                    Box::new(resolution_layer_component_position_progression(iter_input))
-                }
-                ProgressionOrder::ResolutionPositionComponentLayer => Box::new(
-                    resolution_position_component_layer_progression(iter_input)
-                        .ok_or(DecodingError::InvalidProgressionIterator)?,
-                ),
-                ProgressionOrder::PositionComponentResolutionLayer => Box::new(
-                    position_component_resolution_layer_progression(iter_input)
-                        .ok_or(DecodingError::InvalidProgressionIterator)?,
-                ),
-                ProgressionOrder::ComponentPositionResolutionLayer => Box::new(
-                    component_position_resolution_layer_progression(iter_input)
-                        .ok_or(DecodingError::InvalidProgressionIterator)?,
-                ),
-            };
+        let progression_iterator = progression_iterator(tile, header)?;
 
         decode_tile(
             tile,
@@ -109,7 +79,7 @@ pub struct DecoderContext<'a> {
 }
 
 impl DecoderContext<'_> {
-    fn reset(&mut self, header: &Header<'_>, initial_tile: &Tile<'_>) -> Result<()> {
+    fn reset(&mut self, header: &Header, initial_tile: &Tile<'_>) -> Result<()> {
         self.tile_decode_context.reset();
         self.storage.reset();
 
@@ -131,7 +101,7 @@ impl DecoderContext<'_> {
 
 fn decode_tile<'a, 'b>(
     tile: &'b Tile<'a>,
-    header: &Header<'_>,
+    header: &Header,
     progression_iterator: Box<dyn Iterator<Item = ProgressionData> + '_>,
     tile_ctx: &mut TileDecodeContext,
     channel_data: &mut [ComponentData],
@@ -310,7 +280,7 @@ fn decode_component_tile_bit_planes<'a>(
     tile: &Tile<'a>,
     tile_ctx: &mut TileDecodeContext,
     storage: &mut DecompositionStorage<'a>,
-    header: &Header<'_>,
+    header: &Header,
 ) -> Result<()> {
     let component_info = &tile.component_infos[component_idx];
 
@@ -340,7 +310,7 @@ fn decode_sub_band_bitplanes(
     component_info: &ComponentInfo,
     tile_ctx: &mut TileDecodeContext,
     storage: &mut DecompositionStorage<'_>,
-    header: &Header<'_>,
+    header: &Header,
 ) -> Result<()> {
     let sub_band = &storage.sub_bands[sub_band_idx];
 
@@ -371,10 +341,11 @@ fn decode_sub_band_bitplanes(
 
     let num_bitplanes = {
         let (exponent, _) = component_info.exponent_mantissa(sub_band.sub_band_type, resolution)?;
-        // Equation (E-2)
+        // Equations (E-2) and (H-3).
         let num_bitplanes = (component_info.quantization_info.guard_bits as u16)
             .checked_add(exponent)
             .and_then(|x| x.checked_sub(1))
+            .and_then(|x| x.checked_add(component_info.roi_shift as u16))
             .ok_or(DecodingError::InvalidBitplaneCount)?;
 
         if num_bitplanes > MAX_BITPLANE_COUNT as u16 {
@@ -421,7 +392,11 @@ fn decode_sub_band_bitplanes(
                 for ((output, coefficient), coefficient_state) in
                     out_row.iter_mut().zip(coefficients).zip(coefficient_states)
                 {
-                    *output = coefficient.reconstructed(coefficient_state, irreversible);
+                    *output = coefficient.reconstructed(
+                        coefficient_state,
+                        irreversible,
+                        component_info.roi_shift,
+                    );
                     *output *= dequantization_step;
                 }
 
@@ -440,7 +415,7 @@ fn apply_sign_shift(channel_data: &mut [ComponentData], component_infos: &[Compo
         let offset = (1_u32 << (component_info.size_info.precision - 1)) as f32;
         dispatch!(Level::new(), simd => {
             let offset_v = f32x8::splat(simd, offset);
-            for chunk in channel.container.chunks_exact_mut(8) {
+            for chunk in channel.container.as_chunks_mut::<8>().0 {
                 let v = f32x8::from_slice(simd, chunk);
                 (v + offset_v).store(chunk);
             }
@@ -450,7 +425,7 @@ fn apply_sign_shift(channel_data: &mut [ComponentData], component_infos: &[Compo
 
 fn store<'a>(
     tile: &'a Tile<'a>,
-    header: &Header<'_>,
+    header: &Header,
     tile_ctx: &mut TileDecodeContext,
     channel_data: &mut ComponentData,
     component_info: &ComponentInfo,
@@ -463,14 +438,20 @@ fn store<'a>(
         component_info.num_resolution_levels() - 1 - header.skipped_resolution_levels,
     );
 
+    // Resolution levels can be empty (B-14), in which case there is nothing
+    // to store.
+    if idwt_output.rect.width() == 0 || idwt_output.rect.height() == 0 {
+        return;
+    }
+
     let (scale_x, scale_y) = (
         component_info.size_info.horizontal_resolution,
         component_info.size_info.vertical_resolution,
     );
 
     let (image_x_offset, image_y_offset) = (
-        header.size_data.image_area_x_offset,
-        header.size_data.image_area_y_offset,
+        header.size_data.image_x_offset(),
+        header.size_data.image_y_offset(),
     );
 
     if scale_x == 1 && scale_y == 1 {
@@ -511,35 +492,41 @@ fn store<'a>(
         let x_shrink_factor = header.size_data.x_shrink_factor;
         let y_shrink_factor = header.size_data.y_shrink_factor;
 
-        let x_offset = header
-            .size_data
-            .image_area_x_offset
-            .div_ceil(x_shrink_factor);
-        let y_offset = header
-            .size_data
-            .image_area_y_offset
-            .div_ceil(y_shrink_factor);
-
         // Otherwise, copy sample by sample.
+        let first_x = (tile.rect.x0 == header.size_data.image_area_x_offset)
+            .then_some(resolution_tile.rect.x0);
+        let first_y = (tile.rect.y0 == header.size_data.image_area_y_offset)
+            .then_some(resolution_tile.rect.y0);
+
         for y in resolution_tile.rect.y0..resolution_tile.rect.y1 {
-            let relative_y = (y - component_tile.rect.y0) as usize;
-            let reference_grid_y = (scale_y as u32 * y) / y_shrink_factor;
+            let relative_y = (y - idwt_output.rect.y0) as usize;
+            let reference_grid_y = if first_y == Some(y) {
+                image_y_offset
+            } else {
+                (scale_y as u32 * y) / y_shrink_factor
+            };
+            let y_end = (scale_y as u32 * (y + 1)) / y_shrink_factor;
 
             for x in resolution_tile.rect.x0..resolution_tile.rect.x1 {
-                let relative_x = (x - component_tile.rect.x0) as usize;
-                let reference_grid_x = (scale_x as u32 * x) / x_shrink_factor;
+                let relative_x = (x - idwt_output.rect.x0) as usize;
+                let reference_grid_x = if first_x == Some(x) {
+                    image_x_offset
+                } else {
+                    (scale_x as u32 * x) / x_shrink_factor
+                };
+                let x_end = (scale_x as u32 * (x + 1)) / x_shrink_factor;
 
                 let sample = idwt_output.coefficients
                     [relative_y * idwt_output.rect.width() as usize + relative_x];
 
-                for x_position in u32::max(reference_grid_x, x_offset)
-                    ..u32::min(reference_grid_x + scale_x as u32, image_width + x_offset)
+                for x_position in u32::max(reference_grid_x, image_x_offset)
+                    ..u32::min(x_end, image_width + image_x_offset)
                 {
-                    for y_position in u32::max(reference_grid_y, y_offset)
-                        ..u32::min(reference_grid_y + scale_y as u32, image_height + y_offset)
+                    for y_position in u32::max(reference_grid_y, image_y_offset)
+                        ..u32::min(y_end, image_height + image_y_offset)
                     {
-                        let pos = (y_position - y_offset) as usize * image_width as usize
-                            + (x_position - x_offset) as usize;
+                        let pos = (y_position - image_y_offset) as usize * image_width as usize
+                            + (x_position - image_x_offset) as usize;
 
                         channel_data.container[pos] = sample;
                     }

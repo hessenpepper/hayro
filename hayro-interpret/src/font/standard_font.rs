@@ -6,6 +6,7 @@ use crate::font::{
     Encoding, FontData, FontQuery, glyph_name_to_unicode, normalized_glyph_name, stretch_glyph,
     strip_subset_prefix,
 };
+use hayro_cmap::BfString;
 use hayro_syntax::object::Dict;
 use hayro_syntax::object::Name;
 use hayro_syntax::object::dict::keys::{BASE_FONT, FONT_DESC, FONT_WEIGHT, ITALIC_ANGLE};
@@ -484,8 +485,10 @@ impl StandardKind {
         }
     }
 
-    pub(crate) fn char_code_to_unicode(&self, code: u8) -> Option<char> {
-        self.code_to_ps_name(code).and_then(glyph_name_to_unicode)
+    pub(crate) fn char_code_to_unicode(&self, code: u8) -> Option<BfString> {
+        let is_zapf_dingbats = matches!(self.base_font, StandardFont::ZapfDingBats);
+        self.code_to_ps_name(code)
+            .and_then(|name| glyph_name_to_unicode(name, is_zapf_dingbats))
     }
 
     pub(crate) fn is_italic(&self) -> bool {

@@ -5,7 +5,8 @@ use crate::context::InterpreterCache;
 use crate::device::Device;
 use crate::font::cid::Type0Font;
 use crate::font::generated::{
-    glyph_names, mac_expert, mac_os_roman, mac_roman, standard, win_ansi,
+    glyph_names, mac_expert, mac_os_roman, mac_roman, standard, tex_glyph_names, win_ansi,
+    zapf_dings,
 };
 use crate::font::true_type::TrueTypeFont;
 use crate::font::type1::Type1Font;
@@ -19,7 +20,7 @@ use hayro_syntax::object::dict::keys::*;
 use hayro_syntax::object::{Array, Dict, Stream};
 use hayro_syntax::page::Resources;
 use hayro_syntax::xref::XRef;
-use kurbo::{Affine, BezPath, Vec2};
+use kurbo::{Affine, BezPath, Rect, Vec2};
 use outline::OutlineFont;
 use skrifa::GlyphId;
 use std::borrow::Cow;
@@ -94,6 +95,8 @@ impl Glyph<'_> {
     ///
     /// **For Type3 Fonts:**
     /// 1. `ToUnicode` cmap
+    /// 2. Glyph name → Unicode (via Adobe Glyph List)
+    /// 3. Unicode naming conventions (e.g., "uni0041", "u0041")
     ///
     /// Returns `None` if the Unicode value could not be determined.
     ///
@@ -103,6 +106,16 @@ impl Glyph<'_> {
         match self {
             Glyph::Outline(g) => g.as_unicode(),
             Glyph::Type3(g) => g.as_unicode(),
+        }
+    }
+
+    /// Return the character code that selected this glyph.
+    ///
+    /// For composite fonts, this is the code read with the font's `CMap`, not the CID.
+    pub fn char_code(&self) -> u32 {
+        match self {
+            Glyph::Outline(g) => g.char_code(),
+            Glyph::Type3(g) => g.char_code(),
         }
     }
 }
@@ -206,6 +219,11 @@ impl OutlineGlyph {
         self.id
     }
 
+    /// Get the original character code that selected this glyph.
+    pub fn char_code(&self) -> u32 {
+        self.char_code
+    }
+
     /// Get the advance width for this glyph.
     ///
     /// The advance width is how far to move horizontally after drawing
@@ -229,6 +247,7 @@ pub struct Type3Glyph<'a> {
     pub(crate) font: Rc<Type3<'a>>,
     pub(crate) glyph_id: GlyphId,
     pub(crate) state: State<'a>,
+    pub(crate) bbox: Rect,
     pub(crate) parent_resources: Resources<'a>,
     pub(crate) cache: InterpreterCache<'a>,
     pub(crate) xref: &'a XRef,
@@ -253,15 +272,20 @@ impl<'a> Type3Glyph<'a> {
 
     /// Returns the Unicode code point for this glyph, if available.
     ///
-    /// Note: Type3 fonts can only provide Unicode via `ToUnicode` cmap.
+    /// See [`Glyph::as_unicode`] for details on the fallback chain used.
     pub fn as_unicode(&self) -> Option<BfString> {
         self.font.char_code_to_unicode(self.char_code)
+    }
+
+    /// Get the original character code that selected this glyph.
+    pub fn char_code(&self) -> u32 {
+        self.char_code
     }
 }
 
 impl CacheKey for Type3Glyph<'_> {
     fn cache_key(&self) -> u128 {
-        hash128(&(self.font.cache_key(), self.glyph_id))
+        hash128(&(self.font.cache_key(), self.glyph_id, self.bbox.cache_key()))
     }
 }
 
@@ -412,7 +436,8 @@ impl<'a> Font<'a> {
                 let shape_glyph = Type3Glyph {
                     font: t.clone(),
                     glyph_id: glyph,
-                    state: ctx.get().clone(),
+                    state: ctx.snapshot(),
+                    bbox: ctx.bbox(),
                     parent_resources: resources.clone(),
                     cache: ctx.interpreter_cache.clone(),
                     xref: ctx.xref,
@@ -698,19 +723,81 @@ impl Default for FallbackFontQuery {
     }
 }
 
-/// Convert a glyph name to a Unicode character, if possible.
-/// An incomplete implementation of the Adobe Glyph List Specification
-/// <https://github.com/adobe-type-tools/agl-specification>
-pub(crate) fn glyph_name_to_unicode(name: &str) -> Option<char> {
-    if let Some(unicode_str) = glyph_names::get(name) {
-        return unicode_str.chars().next();
+/// Convert a glyph name to its Unicode value, if possible, as described in the Adobe Glyph List
+/// Specification (<https://github.com/adobe-type-tools/agl-specification>), with the AGL
+/// extended by glyph names used in the Computer Modern and AMS fonts.
+pub(crate) fn glyph_name_to_unicode(name: &str, is_zapf_dingbats: bool) -> Option<BfString> {
+    let base = name.split('.').next().unwrap_or_default();
+    let mut out = String::new();
+
+    for component in base.split('_') {
+        if let Some(c) = is_zapf_dingbats
+            .then(|| zapf_dings::glyph_name_to_unicode(component))
+            .flatten()
+        {
+            out.push(c);
+        } else if let Some(unicode_str) =
+            glyph_names::get(component).or_else(|| tex_glyph_names::get(component))
+        {
+            out.push_str(unicode_str);
+        } else if let Some(unicode_str) = uni_component(component) {
+            out.push_str(&unicode_str);
+        } else if let Some(c) = u_component(component) {
+            out.push(c);
+        }
     }
 
-    unicode_from_name(name).or_else(|| {
+    bf_string_from_str(&out).or_else(|| {
         warn!("failed to map glyph name {} to unicode", name);
 
         None
     })
+}
+
+fn uni_component(component: &str) -> Option<String> {
+    let digits = component.strip_prefix("uni")?.as_bytes();
+
+    if digits.is_empty() || digits.len() % 4 != 0 {
+        return None;
+    }
+
+    digits
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|group| char::from_u32(parse_uppercase_hex(group)?))
+        .collect()
+}
+
+fn u_component(component: &str) -> Option<char> {
+    let digits = component.strip_prefix('u')?.as_bytes();
+
+    if !(4..=6).contains(&digits.len()) {
+        return None;
+    }
+
+    char::from_u32(parse_uppercase_hex(digits)?)
+}
+
+fn parse_uppercase_hex(digits: &[u8]) -> Option<u32> {
+    digits.iter().try_fold(0_u32, |value, digit| {
+        let digit = match digit {
+            b'0'..=b'9' => digit - b'0',
+            b'A'..=b'F' => digit - b'A' + 10,
+            _ => return None,
+        };
+
+        Some(value * 16 + u32::from(digit))
+    })
+}
+
+fn bf_string_from_str(s: &str) -> Option<BfString> {
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Some(BfString::Char(c)),
+        (Some(_), Some(_)) => Some(BfString::String(s.to_string())),
+        (None, _) => None,
+    }
 }
 
 pub(crate) fn unicode_from_name(name: &str) -> Option<char> {
@@ -753,4 +840,43 @@ pub(crate) fn normalized_glyph_name(mut name: &str) -> &str {
     }
 
     name
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glyph_name_to_unicode;
+    use hayro_cmap::BfString;
+
+    fn map(name: &str) -> Option<String> {
+        glyph_name_to_unicode(name, false).map(|unicode| match unicode {
+            BfString::Char(c) => c.to_string(),
+            BfString::String(s) => s,
+        })
+    }
+
+    #[test]
+    fn agl_specification_examples() {
+        assert_eq!(map("Lcommaaccent").as_deref(), Some("\u{013B}"));
+        assert_eq!(map("uni20AC0308").as_deref(), Some("\u{20AC}\u{0308}"));
+        assert_eq!(map("u1040C").as_deref(), Some("\u{1040C}"));
+        assert_eq!(map("uniD801DC0C"), None);
+        assert_eq!(map("uni20ac"), None);
+        assert_eq!(
+            map("Lcommaaccent_uni20AC0308_u1040C.alternate").as_deref(),
+            Some("\u{013B}\u{20AC}\u{0308}\u{1040C}")
+        );
+        assert_eq!(map("foo"), None);
+        assert_eq!(map(".notdef"), None);
+    }
+
+    #[test]
+    fn components() {
+        assert_eq!(map("dalethatafpatah").as_deref(), Some("\u{05D3}\u{05B2}"));
+        assert_eq!(map("hyphen.case").as_deref(), Some("-"));
+        assert_eq!(map("f_f_l").as_deref(), Some("ffl"));
+        assert_eq!(map("f_g102").as_deref(), Some("f"));
+        assert_eq!(map("uni000A0020").as_deref(), Some("\n "));
+        assert_eq!(map("u41"), None);
+        assert_eq!(map("u110000"), None);
+    }
 }

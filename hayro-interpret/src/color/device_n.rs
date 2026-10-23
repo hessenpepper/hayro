@@ -69,7 +69,7 @@ impl ToRgb for DeviceN {
     fn convert(&self, input: &[u8], output: &mut [u8]) -> Option<()> {
         if self.num_components == 1 {
             let lookup = self.u8_lookup()?;
-            for (input, output) in input.iter().zip(output.chunks_exact_mut(3)) {
+            for (input, output) in input.iter().zip(output.as_chunks_mut::<3>().0) {
                 output.copy_from_slice(&lookup[*input as usize]);
             }
 

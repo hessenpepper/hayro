@@ -95,7 +95,7 @@ impl<'a> SvgRenderer<'a> {
                 let rgba8 = c.to_rgba().to_rgba8();
                 let color = format!(
                     "#{}",
-                    &rgba8[0..3]
+                    rgba8[0..3]
                         .iter()
                         .map(|b| format!("{b:02x}"))
                         .collect::<String>()

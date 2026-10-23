@@ -16,12 +16,24 @@
     "file": "pdfs/custom/annotation_checkbox.pdf"
   },
   {
+    "id": "annotation_no_view",
+    "file": "pdfs/custom/annotation_no_view.pdf"
+  },
+  {
+    "id": "annotation_bbox_offset",
+    "file": "pdfs/custom/annotation_bbox_offset.pdf"
+  },
+  {
     "id": "clip_path_evenodd",
     "file": "pdfs/custom/clip_path_evenodd.pdf"
   },
   {
     "id": "clip_path_nested",
     "file": "pdfs/custom/clip_path_nested.pdf"
+  },
+  {
+    "id": "clip_path_painted",
+    "file": "pdfs/custom/clip_path_painted.pdf"
   },
   {
     "id": "color_separation_3",
@@ -54,6 +66,10 @@
   {
     "id": "color_space_separation_2",
     "file": "pdfs/custom/color_space_separation_2.pdf"
+  },
+  {
+    "id": "fill_degenerate",
+    "file": "pdfs/custom/fill_degenerate.pdf"
   },
   {
     "id": "filter_flate_1bit",
@@ -252,6 +268,10 @@
     "file": "pdfs/custom/image_ccit_4.pdf"
   },
   {
+    "id": "image_ccitt_rows_above_height",
+    "file": "pdfs/custom/image_ccitt_rows_above_height.pdf"
+  },
+  {
     "id": "image_ccitt_rows_below_height",
     "file": "pdfs/custom/image_ccitt_rows_below_height.pdf"
   },
@@ -332,6 +352,10 @@
     "file": "pdfs/custom/image_mask_4.pdf"
   },
   {
+    "id": "image_mask_alpha",
+    "file": "pdfs/custom/image_mask_alpha.pdf"
+  },
+  {
     "id": "image_mask_hairline",
     "file": "pdfs/custom/image_mask_hairline.pdf"
   },
@@ -378,6 +402,10 @@
   {
     "id": "image_rgba8_icc",
     "file": "pdfs/custom/image_rgba8_icc.pdf"
+  },
+  {
+    "id": "image_smask_downscale",
+    "file": "pdfs/custom/image_smask_downscale.pdf"
   },
   {
     "id": "integration_coat_of_arms",
@@ -534,6 +562,10 @@
     "file": "pdfs/custom/path_rendering_dash_array_0_phase.pdf"
   },
   {
+    "id": "path_re_current_point",
+    "file": "pdfs/custom/path_re_current_point.pdf"
+  },
+  {
     "id": "pattern_shading_background",
     "file": "pdfs/custom/pattern_shading_background.pdf"
   },
@@ -646,6 +678,10 @@
     "file": "pdfs/custom/pattern_shading_type6_2.pdf"
   },
   {
+    "id": "pattern_tiling_step",
+    "file": "pdfs/custom/pattern_tiling_step.pdf"
+  },
+  {
     "id": "rendering_conflation_artifacts",
     "file": "pdfs/custom/rendering_conflation_artifacts.pdf",
     "first_page": 2,
@@ -734,6 +770,10 @@
     "file": "pdfs/custom/text_with_rise.pdf"
   },
   {
+    "id": "type3_shading_glyph",
+    "file": "pdfs/custom/type3_shading_glyph.pdf"
+  },
+  {
     "id": "xobject_1",
     "file": "pdfs/custom/xobject_1.pdf"
   },
@@ -792,6 +832,10 @@
   {
     "id": "font_type3_shape_glyphs",
     "file": "pdfs/custom/font_type3_shape_glyphs.pdf"
+  },
+  {
+    "id": "pattern_tiling_cache_key",
+    "file": "pdfs/custom/pattern_tiling_cache_key.pdf"
   },
   {
     "id": "pattern_tiling_inner_transform",
@@ -943,6 +987,18 @@
   {
     "id": "mask_luminosity",
     "file": "pdfs/custom/mask_luminosity.pdf"
+  },
+  {
+    "id": "mask_no_cs",
+    "file": "pdfs/custom/mask_no_cs.pdf"
+  },
+  {
+    "id": "mask_luminosity_no_cs",
+    "file": "pdfs/custom/mask_luminosity_no_cs.pdf"
+  },
+  {
+    "id": "mask_reuse",
+    "file": "pdfs/custom/mask_reuse.pdf"
   },
   {
     "id": "resvg_masking_clipPath_mixed_clip_rule",
@@ -1224,5 +1280,21 @@
     "link": true,
     "first_page": 12,
     "last_page": 12
+  },
+  {
+    "id": "deeply_nested_object",
+    "file": "pdfs/custom/deeply_nested_object.pdf"
+  },
+  {
+    "id": "pattern_tiling_uncolored_named_base",
+    "file": "pdfs/custom/pattern_tiling_uncolored_named_base.pdf"
+  },
+  {
+    "id": "image_inline_9",
+    "file": "pdfs/custom/image_inline_9.pdf"
+  },
+  {
+    "id": "image_inline_10",
+    "file": "pdfs/custom/image_inline_10.pdf"
   }
 ]

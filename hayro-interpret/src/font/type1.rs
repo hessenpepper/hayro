@@ -118,9 +118,9 @@ impl Type1Font {
 
         let code = char_code as u8;
         match &self.1 {
-            Kind::Standard(s) => s.char_code_to_unicode(code).map(BfString::Char),
-            Kind::Cff(c) => c.char_code_to_unicode(code).map(BfString::Char),
-            Kind::Type1(t) => t.char_code_to_unicode(code).map(BfString::Char),
+            Kind::Standard(s) => s.char_code_to_unicode(code),
+            Kind::Cff(c) => c.char_code_to_unicode(code),
+            Kind::Type1(t) => t.char_code_to_unicode(code),
         }
     }
 }
@@ -238,8 +238,10 @@ impl Type1Kind {
         }
     }
 
-    fn char_code_to_unicode(&self, code: u8) -> Option<char> {
-        self.code_to_ps_name(code).and_then(glyph_name_to_unicode)
+    fn char_code_to_unicode(&self, code: u8) -> Option<BfString> {
+        let is_zapf_dingbats = matches!(self.standard_font, Some(StandardFont::ZapfDingBats));
+        self.code_to_ps_name(code)
+            .and_then(|name| glyph_name_to_unicode(name, is_zapf_dingbats))
     }
 }
 
@@ -335,7 +337,9 @@ impl CffKind {
         }
     }
 
-    fn char_code_to_unicode(&self, code: u8) -> Option<char> {
-        self.code_to_ps_name(code).and_then(glyph_name_to_unicode)
+    fn char_code_to_unicode(&self, code: u8) -> Option<BfString> {
+        let is_zapf_dingbats = matches!(self.standard_font, Some(StandardFont::ZapfDingBats));
+        self.code_to_ps_name(code)
+            .and_then(|name| glyph_name_to_unicode(name, is_zapf_dingbats))
     }
 }
