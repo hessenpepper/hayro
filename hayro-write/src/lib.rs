@@ -11,6 +11,7 @@ well-documented.
 #[macro_use]
 mod log;
 
+pub mod incremental;
 mod primitive;
 
 use crate::primitive::{WriteDirect, WriteIndirect};
