@@ -185,6 +185,20 @@ pub enum Rotation {
     FlippedHorizontal,
 }
 
+impl Rotation {
+    /// The rotation in degrees clockwise, as the page's `/Rotate` gives it: 0, 90, 180 or 270.
+    ///
+    /// Model: claude-opus-5-5 (medium effort, sp-worker) -- designed and written, 2026-10-30.
+    pub fn degrees(self) -> u16 {
+        match self {
+            Self::None => 0,
+            Self::Horizontal => 90,
+            Self::Flipped => 180,
+            Self::FlippedHorizontal => 270,
+        }
+    }
+}
+
 /// A PDF page.
 pub struct Page<'a> {
     inner: Dict<'a>,
@@ -537,6 +551,71 @@ pub(crate) mod cached {
 
         pub(crate) fn get(&self) -> &Pages<'_> {
             &self.pages
+        }
+    }
+}
+
+/// Model: claude-opus-5-5 (medium effort, sp-worker) -- designed and written, 2026-10-30.
+#[cfg(test)]
+mod tests {
+    use super::Rotation;
+    use crate::Pdf;
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    /// A one-page PDF whose page has `/Rotate rotate` (none when `None`), with a correct xref table.
+    fn one_page(rotate: Option<i32>) -> Vec<u8> {
+        let rotate = rotate.map(|r| format!(" /Rotate {r}")).unwrap_or_default();
+        let objects = [
+            String::from("<< /Type /Catalog /Pages 2 0 R >>"),
+            String::from("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]{rotate} >>"),
+        ];
+        let mut out = String::from("%PDF-1.7\n");
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.push_str(&format!("{} 0 obj\n{body}\nendobj\n", i + 1));
+        }
+        let xref = out.len();
+        out.push_str(&format!(
+            "xref\n0 {}\n0000000000 65535 f \n",
+            objects.len() + 1
+        ));
+        for o in offsets {
+            out.push_str(&format!("{o:010} 00000 n \n"));
+        }
+        out.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        ));
+        out.into_bytes()
+    }
+
+    #[test]
+    fn rotation_degrees() {
+        assert_eq!(Rotation::None.degrees(), 0);
+        assert_eq!(Rotation::Horizontal.degrees(), 90);
+        assert_eq!(Rotation::Flipped.degrees(), 180);
+        assert_eq!(Rotation::FlippedHorizontal.degrees(), 270);
+    }
+
+    /// A page's `/Rotate` comes back as its degrees, normalized to 0..360; an absent one is 0.
+    #[test]
+    fn page_rotation_degrees_from_rotate() {
+        for (rotate, degrees) in [
+            (None, 0),
+            (Some(0), 0),
+            (Some(90), 90),
+            (Some(180), 180),
+            (Some(270), 270),
+            (Some(-90), 270),
+            (Some(450), 90),
+        ] {
+            let pdf = Pdf::new(one_page(rotate)).unwrap();
+            let page = &pdf.pages()[0];
+            assert_eq!(page.rotation().degrees(), degrees, "/Rotate {rotate:?}");
         }
     }
 }
