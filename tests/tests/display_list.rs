@@ -8,17 +8,17 @@ use hayro::hayro_interpret::util::RectExt;
 use hayro::kurbo::{Affine, Rect};
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{DisplayList, render_region};
+use hayro_syntax::Pdf;
 
-/// Committed PDFs covering text (TrueType, Type 1, CFF, CID), dashed and styled strokes,
-/// clips, images and a drawing. None of them needs a fallback, so the replay is compared,
-/// not a direct render with itself.
+/// Committed PDFs covering text (TrueType, Type 1, CFF, CID), stroke styles, clips, an
+/// inline image and a drawing. None of them needs a fallback, so the replay is compared, not
+/// a direct render with itself (`replay_matches_direct` fails a page that falls back).
 const FILES: &[&str] = &[
     "pdfs/custom/font_truetype_1.pdf",
     "pdfs/custom/font_type1_1.pdf",
     "pdfs/custom/font_type1_cff_1.pdf",
     "pdfs/custom/font_cid_1.pdf",
     "pdfs/custom/pdftc_900k_0156_page_2.pdf",
-    "pdfs/custom/path_rendering_dash_array_0_phase.pdf",
     "pdfs/custom/stroke_properties.pdf",
     "pdfs/custom/clip_path_nested.pdf",
     "pdfs/custom/image_inline_2.pdf",
@@ -37,17 +37,65 @@ pub(crate) fn tests() -> Vec<Test> {
             Test::new(
                 format!("display_list::{stem}"),
                 vec![file.to_string()],
-                move || replay_matches_direct(file),
+                move || match try_load_pdf(file, "") {
+                    Ok(pdf) => replay_matches_direct(&pdf),
+                    Err(err) => Outcome::Failed(err),
+                },
             )
         })
+        .chain([Test::new("display_list::dashed_paths", vec![], || {
+            match Pdf::new(dashed_paths()) {
+                Ok(pdf) => replay_matches_direct(&pdf),
+                Err(err) => Outcome::Failed(format!("couldn't load the generated PDF: {err:?}")),
+            }
+        })])
         .collect()
 }
 
-fn replay_matches_direct(file: &str) -> Outcome {
-    let pdf = match try_load_pdf(file, "") {
-        Ok(pdf) => pdf,
-        Err(err) => return Outcome::Failed(err),
-    };
+/// A page of dashed strokes: a closed rectangle (`re`), a closed four-sided path drawn the
+/// other way from another corner, a curve, a sub-pixel dash period and a filled rectangle.
+fn dashed_paths() -> Vec<u8> {
+    use pdf_writer::{Content, Finish, Rect, Ref};
+
+    let mut content = Content::new();
+    content.set_stroke_rgb(0.8, 0.1, 0.1).set_line_width(2.0);
+    content.set_dash_pattern([6.0, 3.0], 1.0);
+    content.rect(20.0, 20.0, 160.0, 70.0).stroke();
+    content.set_dash_pattern([9.0, 2.0, 1.0, 2.0], 4.0);
+    content
+        .move_to(180.0, 110.0)
+        .line_to(20.0, 110.0)
+        .line_to(20.0, 180.0)
+        .line_to(180.0, 180.0)
+        .close_and_stroke();
+    content.set_dash_pattern([4.0], 0.0);
+    content
+        .move_to(30.0, 130.0)
+        .cubic_to(60.0, 175.0, 140.0, 85.0, 170.0, 130.0)
+        .stroke();
+    content.set_dash_pattern([0.02, 0.02], 0.0);
+    content
+        .move_to(30.0, 100.0)
+        .line_to(170.0, 100.0)
+        .stroke();
+    content.set_fill_rgb(0.1, 0.3, 0.8);
+    content.rect(90.0, 40.0, 30.0, 30.0).fill_nonzero();
+    let content = content.finish();
+
+    let (catalog, tree, page, contents) = (Ref::new(1), Ref::new(2), Ref::new(3), Ref::new(4));
+    let mut pdf = pdf_writer::Pdf::new();
+    pdf.catalog(catalog).pages(tree);
+    pdf.pages(tree).kids([page]).count(1);
+    let mut p = pdf.page(page);
+    p.media_box(Rect::new(0.0, 0.0, 200.0, 200.0));
+    p.parent(tree);
+    p.contents(contents);
+    p.finish();
+    pdf.stream(contents, &content);
+    pdf.finish()
+}
+
+fn replay_matches_direct(pdf: &Pdf) -> Outcome {
     let settings = interpreter_settings();
     let never = || false;
 
@@ -91,6 +139,9 @@ fn replay_matches_direct(file: &str) -> Outcome {
                     "page {index}, {name}: {differing} pixels differ between the replay and \
                      the direct render"
                 ));
+            }
+            if name == "whole page" && a.chunks(4).all(|p| p == [255, 255, 255, 255]) {
+                return Outcome::Failed(format!("page {index} replays blank"));
             }
         }
     }
