@@ -61,7 +61,7 @@ impl Renderer<'_> {
         self.set_stroke_properties(stroke_props, is_text);
 
         let stroke = self.ctx.stroke();
-        let extent = stroke.width / 2.0 * stroke.miter_limit.max(SQRT_2);
+        let extent = stroke_extent(stroke.width, stroke.miter_limit);
         let bbox = path.control_box().inflate(extent, extent);
         if self.misses_target(props.transform.transform_rect_bbox(bbox)) {
             return;
@@ -153,6 +153,16 @@ impl Renderer<'_> {
             DrawMode::Invisible => {}
         }
     }
+}
+
+// Model-Written: claude-opus-5-5 (high effort, sp-worker-high) -- designed and written, 2026-11-21.
+/// How far a stroke `width` wide can reach past its path, in the same units: half the width
+/// times the miter limit (a miter join's tip) or times √2 (a square cap's corner), whichever
+/// is more. The one rule for the renderer's culling (`stroke_path`) and the display list's
+/// stroke boxes; `display_list::miter_tip_and_square_cap` in `hayro-tests` fails if a
+/// recorded box falls short of what the renderer draws.
+pub(crate) fn stroke_extent(width: f64, miter_limit: f64) -> f64 {
+    width / 2.0 * miter_limit.max(SQRT_2)
 }
 
 pub(crate) fn max_factor(transform: &Affine) -> f32 {

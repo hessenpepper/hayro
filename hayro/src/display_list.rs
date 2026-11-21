@@ -22,6 +22,7 @@
 //! replays render the region directly instead. That is always correct, only slower.
 
 use crate::image::{Decoded, DecodedImage};
+use crate::path::{max_factor, stroke_extent};
 use crate::{GlobalState, RenderCache, RenderSettings, Renderer};
 use hayro_interpret::font::Glyph;
 use hayro_interpret::hayro_syntax::page::Page;
@@ -163,13 +164,11 @@ impl DisplayList {
                 cancelled,
             );
         }
-        // The region in the recording's space, widened by two pixels: the renderer widens
-        // hairlines to at least one pixel at replay time, which a box in points doesn't know.
+        // The region in the recording's space; each item's test widens it by the item's
+        // `replay_reach`, converted at the most recording units a pixel spans.
         let inverse = transform.inverse();
-        let px = 2.0 / transform.determinant().abs().sqrt().max(1e-9);
-        let view = inverse
-            .transform_rect_bbox(Rect::new(0.0, 0.0, width as f64, height as f64))
-            .inflate(px, px);
+        let units_per_px = f64::from(max_factor(&inverse));
+        let view = inverse.transform_rect_bbox(Rect::new(0.0, 0.0, width as f64, height as f64));
         let cache = RenderCache::new();
         let global = GlobalState::new(&cache, &region_settings());
         let mut ctx = RenderContext::new_with(width, height, vc_settings());
@@ -184,10 +183,11 @@ impl DisplayList {
             if i % 1024 == 0 && cancelled() {
                 return None;
             }
-            let visible = bbox.x1 >= view.x0
-                && bbox.x0 <= view.x1
-                && bbox.y1 >= view.y0
-                && bbox.y0 <= view.y1;
+            let m = replay_reach(item) * units_per_px;
+            let visible = bbox.x1 >= view.x0 - m
+                && bbox.x0 <= view.x1 + m
+                && bbox.y1 >= view.y0 - m
+                && bbox.y0 <= view.y1 + m;
             match item {
                 Item::Path(p, t, rgba, blend, mode) => {
                     if visible {
@@ -407,13 +407,32 @@ impl Recorder {
     }
 }
 
+/// How far past its path's bounding box, in the recording's units, a drawing call under `t`
+/// can paint: a stroke's reach (`stroke_extent`) plus one unit, or one unit for a fill.
 fn pad(t: &Affine, mode: &DrawMode) -> f64 {
-    let scale = t.determinant().abs().sqrt();
     match mode {
         DrawMode::Stroke(s) | DrawMode::FillAndStroke(_, s) => {
-            s.line_width as f64 * scale / 2.0 + 1.0
+            let width = s.line_width as f64 * f64::from(max_factor(t));
+            stroke_extent(width, s.miter_limit as f64) + 1.0
         }
         _ => 1.0,
+    }
+}
+
+/// How many pixels past its recorded box an item can paint at replay, which a box in the
+/// recording's units can't know: two for antialiasing and rounding, and for a stroke what
+/// the renderer's minimum width of one pixel reaches (`stroke_extent`). The hairline part
+/// is unchecked: no test draws a hairline's miter tip.
+fn replay_reach(item: &Item) -> f64 {
+    let mode = match item {
+        Item::Path(.., mode) | Item::Rect(.., mode) | Item::Glyphs(.., mode) => mode,
+        _ => return 2.0,
+    };
+    match mode {
+        DrawMode::Stroke(s) | DrawMode::FillAndStroke(_, s) => {
+            2.0 + stroke_extent(1.0, s.miter_limit as f64)
+        }
+        _ => 2.0,
     }
 }
 
