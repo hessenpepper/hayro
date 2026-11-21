@@ -51,14 +51,21 @@ fn render(bytes: Vec<u8>, scale: f64) -> Pixmap {
     let pdf = Pdf::new(bytes).unwrap();
     let page = &pdf.pages()[0];
     let crop = page.intersected_crop_box().to_kurbo();
-    let transform =
-        Affine::scale(scale) * Affine::new([1.0, 0.0, 0.0, -1.0, -crop.x0, crop.y1]);
+    let transform = Affine::scale(scale) * Affine::new([1.0, 0.0, 0.0, -1.0, -crop.x0, crop.y1]);
     let (width, height) = (
         (crop.width() * scale).ceil() as u16,
         (crop.height() * scale).ceil() as u16,
     );
-    render_region(page, &interpreter_settings(), transform, width, height, WHITE, &|| false)
-        .unwrap()
+    render_region(
+        page,
+        &interpreter_settings(),
+        transform,
+        width,
+        height,
+        WHITE,
+        &|| false,
+    )
+    .unwrap()
 }
 
 /// Whether the pixel under the point (`x`, `y`) of a 100-point-tall page rendered at `scale`
@@ -83,10 +90,22 @@ fn a_dashed_path_starts_at_its_own_first_point() {
     let drawn = render(one_page(200.0, 100.0, &drawn), scale);
     let rect = render(one_page(200.0, 100.0, &rect), scale);
 
-    assert!(painted(&drawn, scale, 165.0, 80.0), "a dash 15 from the path's start");
-    assert!(!painted(&drawn, scale, 155.0, 80.0), "a gap 25 from the path's start");
-    assert!(painted(&rect, scale, 155.0, 80.0), "a dash 245 along the rectangle");
-    assert!(!painted(&rect, scale, 165.0, 80.0), "a gap 235 along the rectangle");
+    assert!(
+        painted(&drawn, scale, 165.0, 80.0),
+        "a dash 15 from the path's start"
+    );
+    assert!(
+        !painted(&drawn, scale, 155.0, 80.0),
+        "a gap 25 from the path's start"
+    );
+    assert!(
+        painted(&rect, scale, 155.0, 80.0),
+        "a dash 245 along the rectangle"
+    );
+    assert!(
+        !painted(&rect, scale, 165.0, 80.0),
+        "a gap 235 along the rectangle"
+    );
 }
 
 /// Collects `OutlineGlyph::descriptor_metrics` of every glyph, one list per glyph run.
@@ -182,7 +201,11 @@ fn three_fonts() -> Vec<u8> {
     descriptor(
         &mut pdf,
         6,
-        &[(b"Ascent", 777.0), (b"Descent", -333.0), (b"CapHeight", 555.0)],
+        &[
+            (b"Ascent", 777.0),
+            (b"Descent", -333.0),
+            (b"CapHeight", 555.0),
+        ],
     );
     {
         let mut f = pdf.indirect(Ref::new(7)).dict();
@@ -190,9 +213,7 @@ fn three_fonts() -> Vec<u8> {
         f.pair(Name(b"Subtype"), Name(b"Type0"));
         f.pair(Name(b"BaseFont"), Name(b"Helvetica"));
         f.pair(Name(b"Encoding"), Name(b"Identity-H"));
-        f.insert(Name(b"DescendantFonts"))
-            .array()
-            .item(Ref::new(8));
+        f.insert(Name(b"DescendantFonts")).array().item(Ref::new(8));
     }
     {
         let mut f = pdf.indirect(Ref::new(8)).dict();
@@ -241,6 +262,9 @@ fn descriptor_metrics_reach_the_device() {
     assert_eq!(device.runs.len(), want.len(), "one glyph run per font");
     for (run, (metrics, glyphs)) in device.runs.iter().zip(want) {
         assert_eq!(run.len(), glyphs, "every glyph is an outline glyph");
-        assert!(run.iter().all(|m| *m == metrics), "{run:?} is not {metrics:?}");
+        assert!(
+            run.iter().all(|m| *m == metrics),
+            "{run:?} is not {metrics:?}"
+        );
     }
 }
