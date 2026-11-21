@@ -25,6 +25,7 @@ mod display_list;
 mod harness;
 mod load;
 mod raster;
+mod signalpath;
 mod svg;
 mod text;
 mod write;
@@ -115,6 +116,7 @@ fn collect(args: &Args) -> (Vec<Test>, usize) {
         .chain(load::tests())
         .chain(text::tests())
         .chain(display_list::tests())
+        .chain(signalpath::tests())
         .chain([Test::unit("visibility", visibility)])
         .filter(|test| args.matches(&test.name))
         .collect();

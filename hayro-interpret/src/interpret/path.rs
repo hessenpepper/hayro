@@ -113,10 +113,11 @@ pub(crate) fn stroke_path_impl<'a>(
     let props = context.draw_props(true);
 
     let path = path.unwrap_or(context.path());
-    // Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
+    // Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25; last changed by claude-opus-5-5 (high effort, sp-worker-high), 2026-11-21.
     // A dash pattern runs from the path's first point in the path's own direction (ISO
     // 32000 §8.4.3.6). A rectangle redrawn from `path_as_rect` starts at another corner and
-    // may run the other way, which moves every dash, so a dashed stroke keeps its path.
+    // may run the other way, which moves every dash, so a dashed stroke keeps its path
+    // (`signalpath::a_dashed_path_starts_at_its_own_first_point` in hayro-tests).
     let dashed = !stroke_props.dash_array.is_empty();
     let draw_mode = DrawMode::Stroke(stroke_props);
 
