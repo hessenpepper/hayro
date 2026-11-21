@@ -811,7 +811,7 @@ const fn div_255(value: u16) -> u16 {
     (value + 255) >> 8
 }
 
-// Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
+// Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25; last changed by claude-opus-5-5 (high effort, sp-worker-high), 2026-11-21.
 /// An image decoded once, at full resolution, for a display list (`display_list.rs`).
 #[derive(Clone)]
 pub(crate) enum DecodedImage {
@@ -911,6 +911,7 @@ impl Renderer<'_> {
                 self.ctx.set_fill_rule(old_rule);
             }
         }
-        self.ctx.set_aliasing_threshold(None);
+        self.ctx
+            .set_aliasing_threshold(self.global.aliasing_threshold);
     }
 }

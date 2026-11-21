@@ -1,4 +1,4 @@
-// Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25; changed by claude-opus-5-5 (medium effort, orchestrator), 2026-10-22: upstream merge
+// Model-Written: Claude Opus 5.5 (claude-opus-5-5), claude-opus-5-5 (medium effort, orchestrator; changes), 2026-09-25; last changed by claude-opus-5-5 (high effort, sp-worker-high), 2026-11-21.
 //! A display list (Signal Path's `signalpath` branch; not upstream hayro).
 //!
 //! [`render`](crate::render) interprets the whole page again for every call and draws every
@@ -7,7 +7,12 @@
 //! [`DisplayList::record`] interprets the page once into drawing calls the list owns, each
 //! with its bounding box, and [`DisplayList::replay`] draws only the calls that touch the
 //! requested region, through the same renderer. It is byte-identical to rendering the region
-//! directly ([`render_region`]).
+//! directly ([`render_region`]); the `display_list::` tests of `hayro-tests` compare the two
+//! pixel for pixel.
+//!
+//! Both draw with the same settings (`region_settings`): glyphs are filled from their unhinted outlines, without
+//! the renderer's glyph raster cache. Hinting depends on the device transform, which a list
+//! recorded once doesn't know, and a replay holds outlines, not the font programs to hint them.
 //!
 //! The list owns everything it holds, and is `Send + Sync`. Colours are stored as the RGBA
 //! the renderer would use, glyphs as their outlines, and images decoded once at full
@@ -45,8 +50,19 @@ enum Item {
     PushClip(ClipPath),
     PushClipRect(Rect),
     PopClip,
-    PushGroup(f32, BlendMode),
+    /// Opacity, blend mode, isolated, knockout.
+    PushGroup(f32, BlendMode, bool, bool),
     PopGroup,
+}
+
+/// The renderer settings of every [`DisplayList::replay`] and every [`render_region`]; see the
+/// module docs.
+fn region_settings() -> RenderSettings {
+    RenderSettings {
+        hinting: false,
+        glyph_caching: false,
+        ..RenderSettings::default()
+    }
 }
 
 /// A page's drawing calls, recorded once; see the module docs.
@@ -155,7 +171,7 @@ impl DisplayList {
             .transform_rect_bbox(Rect::new(0.0, 0.0, width as f64, height as f64))
             .inflate(px, px);
         let cache = RenderCache::new();
-        let global = GlobalState::new(&cache, &RenderSettings::default());
+        let global = GlobalState::new(&cache, &region_settings());
         let mut ctx = RenderContext::new_with(width, height, vc_settings());
         let mut device = Renderer::new(&mut ctx, &global);
         let mut crop = self.crop.clone();
@@ -200,7 +216,14 @@ impl DisplayList {
                 }
                 Item::PushClipRect(r) => device.push_clip_rect(&transform.transform_rect_bbox(*r)),
                 Item::PopClip => device.pop_clip(),
-                Item::PushGroup(o, b) => device.push_transparency_group(*o, None, *b),
+                Item::PushGroup(o, b, isolated, knockout) => Device::push_transparency_group(
+                    &mut device,
+                    *o,
+                    None,
+                    *b,
+                    *isolated,
+                    *knockout,
+                ),
                 Item::PopGroup => device.pop_transparency_group(),
             }
         }
@@ -252,7 +275,7 @@ pub fn render_region(
         page.xref(),
         settings.clone(),
     );
-    let global = GlobalState::new(&cache, &RenderSettings::default());
+    let global = GlobalState::new(&cache, &region_settings());
     let mut ctx = RenderContext::new_with(width, height, vc_settings());
     let mut device = Renderer::new(&mut ctx, &global);
     let mut clip = page.intersected_crop_box().to_kurbo().to_path(0.1);
@@ -310,8 +333,15 @@ impl<'a> Device<'a> for Cancellable<'_, '_, '_> {
     fn push_clip_rect(&mut self, r: &Rect) {
         Device::push_clip_rect(self.inner, r);
     }
-    fn push_transparency_group(&mut self, o: f32, m: Option<SoftMask<'a>>, b: BlendMode) {
-        Device::push_transparency_group(self.inner, o, m, b);
+    fn push_transparency_group(
+        &mut self,
+        o: f32,
+        m: Option<SoftMask<'a>>,
+        b: BlendMode,
+        isolated: bool,
+        knockout: bool,
+    ) {
+        Device::push_transparency_group(self.inner, o, m, b, isolated, knockout);
     }
     fn draw_glyph_run(
         &mut self,
@@ -433,11 +463,18 @@ impl<'a> Device<'a> for Recorder {
         self.push(Item::PushClipRect(*r), EVERYWHERE);
     }
 
-    fn push_transparency_group(&mut self, o: f32, m: Option<SoftMask<'a>>, b: BlendMode) {
+    fn push_transparency_group(
+        &mut self,
+        o: f32,
+        m: Option<SoftMask<'a>>,
+        b: BlendMode,
+        isolated: bool,
+        knockout: bool,
+    ) {
         if m.is_some() {
             self.unsupported("a group with a soft mask");
         }
-        self.push(Item::PushGroup(o, b), EVERYWHERE);
+        self.push(Item::PushGroup(o, b, isolated, knockout), EVERYWHERE);
     }
 
     fn draw_glyph_run(
