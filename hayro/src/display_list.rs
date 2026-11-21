@@ -1,4 +1,4 @@
-// Model-Written: Claude Opus 5.5 (claude-opus-5-5), claude-opus-5-5 (medium effort, orchestrator; changes), 2026-09-25; last changed by claude-opus-5-5 (high effort, sp-worker-high), 2026-11-21.
+// Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25; changed by claude-opus-5-5 (medium effort, orchestrator), 2026-10-22: upstream merge; last changed by claude-opus-5-5 (high effort, sp-worker-high), 2026-11-21.
 //! A display list (Signal Path's `signalpath` branch; not upstream hayro).
 //!
 //! [`render`](crate::render) interprets the whole page again for every call and draws every
@@ -10,9 +10,10 @@
 //! directly ([`render_region`]); the `display_list::` tests of `hayro-tests` compare the two
 //! pixel for pixel.
 //!
-//! Both draw with the same settings (`region_settings`): glyphs are filled from their unhinted outlines, without
-//! the renderer's glyph raster cache. Hinting depends on the device transform, which a list
-//! recorded once doesn't know, and a replay holds outlines, not the font programs to hint them.
+//! Both draw with the same settings (`region_settings`): glyphs are filled from their
+//! unhinted outlines, without the renderer's glyph raster cache. Hinting depends on the device
+//! transform, which a list recorded once doesn't know, and a replay holds outlines, not the
+//! font programs to hint them.
 //!
 //! The list owns everything it holds, and is `Send + Sync`. Colours are stored as the RGBA
 //! the renderer would use, glyphs as their outlines, and images decoded once at full
