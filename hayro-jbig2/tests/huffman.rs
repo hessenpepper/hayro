@@ -1,5 +1,3 @@
-//! Symbol dictionaries and text regions with Huffman coding (Annex B).
-
 use crate::check;
 
 #[test]
@@ -13,7 +11,6 @@ fn custom_aggregate_count() {
 }
 
 #[test]
-#[ignore = "hayro limits symbol dictionaries to 65535 symbols"]
 fn many_symbols() {
     check("huffman_many_symbols", "honeycomb");
 }

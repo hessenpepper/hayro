@@ -1,6 +1,6 @@
-//! Each test decodes a raw CCITT stream from `streams` and compares the result
-//! against an image in `references`.
+//! Decodes the CCITT streams in `streams` and compares them against `references`.
 
+mod cancel;
 mod codes;
 mod dimensions;
 mod edges;
@@ -11,7 +11,7 @@ mod modes;
 mod recovery;
 mod settings;
 
-use hayro_ccitt::{DecodeSettings, Decoder, DecoderContext, EncodingMode, decode};
+use hayro_ccitt::{DecodeSettings, Decoder, EncodingMode, decode};
 use std::path::PathBuf;
 
 const G3_1D: EncodingMode = EncodingMode::Group3_1D;
@@ -22,7 +22,6 @@ fn tests_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests")
 }
 
-/// Rows of pixels, where `true` means white.
 type Bitmap = Vec<Vec<bool>>;
 
 fn load_reference(name: &str) -> Bitmap {
@@ -63,8 +62,6 @@ impl Decoder for Collector {
     }
 }
 
-/// Decode `stream` and check that it matches `reference` and that the whole
-/// stream was consumed.
 fn check(stream: &str, reference: &str, configure: impl FnOnce(&mut DecodeSettings)) {
     check_consumed(stream, reference, None, configure);
 }
@@ -80,14 +77,20 @@ fn check_consumed(
         std::fs::read(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
     let reference = load_reference(reference);
 
-    let mut settings = DecodeSettings::new(reference[0].len() as u32, reference.len() as u32);
-    settings.end_of_block = false;
-    settings.encoding = G4;
+    let mut settings = DecodeSettings {
+        columns: reference[0].len() as u32,
+        rows: reference.len() as u32,
+        end_of_block: false,
+        end_of_line: false,
+        rows_are_byte_aligned: false,
+        encoding: G4,
+        strict: false,
+        cancel: None,
+    };
     configure(&mut settings);
 
     let mut collector = Collector::new(settings.columns);
-    let mut ctx = DecoderContext::new(settings);
-    let read = decode(&data, &mut collector, &mut ctx)
+    let read = decode(&data, &mut collector, &settings)
         .unwrap_or_else(|e| panic!("{stream}: decoding failed: {e}"));
 
     let expected_rows = if settings.rows == 0 {
@@ -120,7 +123,6 @@ fn check_consumed(
     );
 }
 
-/// Decode `stream`, which is malformed, and check that it doesn't panic.
 fn check_malformed(
     stream: &str,
     columns: u32,
@@ -131,9 +133,17 @@ fn check_malformed(
     let data =
         std::fs::read(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
 
-    let mut settings = DecodeSettings::new(columns, rows);
+    let mut settings = DecodeSettings {
+        columns,
+        rows,
+        end_of_block: true,
+        end_of_line: false,
+        rows_are_byte_aligned: false,
+        encoding: EncodingMode::Group3_1D,
+        strict: false,
+        cancel: None,
+    };
     configure(&mut settings);
 
-    let mut ctx = DecoderContext::new(settings);
-    let _ = decode(&data, &mut Collector::new(columns), &mut ctx);
+    let _ = decode(&data, &mut Collector::new(columns), &settings);
 }

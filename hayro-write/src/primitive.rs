@@ -1,8 +1,9 @@
 use crate::ExtractionContext;
+use hayro_syntax::Filter;
 use hayro_syntax::object;
 use hayro_syntax::object::dict::keys::{
-    AF, LAST_MODIFIED, LENGTH, METADATA, OC, OPI, PAGE, PAGES, PIECE_INFO, PT_DATA, REF,
-    STRUCT_PARENT, STRUCT_PARENTS, TYPE,
+    AF, DECODE_PARMS, DP, FILTER, LAST_MODIFIED, LENGTH, METADATA, OC, OPI, PAGE, PAGES,
+    PIECE_INFO, PT_DATA, REF, STRUCT_PARENT, STRUCT_PARENTS, TYPE,
 };
 use hayro_syntax::object::{MaybeRef, Null, Number, ObjectIdentifier, Stream};
 use hayro_syntax::object::{Object, array, dict};
@@ -35,9 +36,7 @@ pub(crate) trait WriteDirect {
 
 impl WriteDirect for object::ObjRef {
     fn write_direct(&self, obj: Obj<'_>, ctx: &mut ExtractionContext<'_>) {
-        // Check whether the object is actually valid/exists. Otherwise, we need to write a null
-        // object instead. If we don't, we might end up with dangling object references that
-        // don't actually exist in the PDF chunk, which will lead to a panic in krilla when renumbering.
+        // A ref to a missing object would dangle in the output chunk, so write null instead.
         let valid = *ctx.valid_ref_cache.entry(*self).or_insert_with(|| {
             let id = ObjectIdentifier::new(self.obj_number, self.gen_number);
             match ctx.pdf.xref().get::<Object<'_>>(id) {
@@ -123,10 +122,10 @@ fn write_dict(
     hayro_dict: &dict::Dict<'_>,
     pdf_dict: &mut Dict<'_>,
     ctx: &mut ExtractionContext<'_>,
-    is_stream: bool,
+    skip: &[&[u8]],
 ) {
     for (name, val) in hayro_dict.entries() {
-        if is_stream && name.deref() == LENGTH {
+        if skip.contains(&name.deref()) {
             continue;
         }
 
@@ -140,7 +139,7 @@ impl WriteDirect for object::Dict<'_> {
     fn write_direct(&self, obj: Obj<'_>, ctx: &mut ExtractionContext<'_>) {
         let mut dict = obj.dict();
 
-        write_dict(self, &mut dict, ctx, false);
+        write_dict(self, &mut dict, ctx, &[]);
     }
 }
 
@@ -183,10 +182,36 @@ write_indirect!(array::Array<'_>);
 
 impl WriteIndirect for Stream<'_> {
     fn write_indirect(&self, chunk: &mut Chunk, id: Ref, ctx: &mut ExtractionContext<'_>) {
-        // TODO: Handle `Crypt` filter
         let data = self.raw_data();
         let mut obj = chunk.stream(id, &data);
-        write_dict(self.dict(), obj.deref_mut(), ctx, true);
+        let dict = self.dict();
+
+        if self.filters().first() != Some(&Filter::Crypt) {
+            write_dict(dict, obj.deref_mut(), ctx, &[LENGTH]);
+            return;
+        }
+
+        write_dict(
+            dict,
+            obj.deref_mut(),
+            ctx,
+            &[LENGTH, FILTER, DECODE_PARMS, DP],
+        );
+
+        for (key, sources) in [(FILTER, &[FILTER][..]), (DECODE_PARMS, &[DECODE_PARMS, DP])] {
+            let rest: Vec<_> = sources
+                .iter()
+                .find_map(|source| dict.get::<array::Array<'_>>(source))
+                .map(|array| array.raw_iter().skip(1).collect())
+                .unwrap_or_default();
+
+            if !rest.is_empty() {
+                let mut array = obj.insert(pdf_writer::Name(key)).array();
+                for item in rest {
+                    item.write_direct(array.push(), ctx);
+                }
+            }
+        }
     }
 }
 

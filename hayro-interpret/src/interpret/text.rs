@@ -1,8 +1,9 @@
 use crate::context::Context;
 use crate::device::Device;
-use crate::font::{Glyph, GlyphRun, PositionedGlyph, UNITS_PER_EM};
+use crate::font::{Glyph, GlyphRun, PositionedGlyph, UNITS_PER_EM, get_glyph};
 use crate::interpret::state::TextStateFont;
 use crate::{DrawMode, FillRule};
+use hayro_cmap::WritingMode;
 use hayro_syntax::object;
 use hayro_syntax::page::Resources;
 use kurbo::{Affine, BezPath};
@@ -28,16 +29,11 @@ pub(crate) fn append_text_string<'a>(
     text: &object::String<'_>,
 ) {
     let Some(font) = ctx.text_state().font.clone() else {
-        warn!("tried to show text without active font");
-
         return;
     };
 
     let bytes = text.as_bytes();
 
-    // In case we have a fallback font (which occurs if either no font was set at all
-    // in the content stream, or an invalid one), we only want to show the glyphs
-    // using Helvetica if the bytes are actually valid ASCII.
     let show_glyphs = matches!(font, TextStateFont::Font(_))
         || (matches!(font, TextStateFont::Fallback(_)) && bytes.is_ascii());
 
@@ -48,10 +44,12 @@ pub(crate) fn append_text_string<'a>(
 
         if show_glyphs && ctx.ocg_state.is_visible() {
             let origin_displacement = font.origin_displacement(code);
+            let glyph_id = font.map_code(code);
             let transform = ctx.text_state().full_transform()
                 * Affine::scale(1.0 / UNITS_PER_EM as f64)
-                * Affine::translate(origin_displacement);
-            let glyph = font.get_glyph(font.map_code(code), code, ctx, resources);
+                * Affine::translate(origin_displacement)
+                * Affine::scale_non_uniform(font.glyph_stretch(glyph_id, code), 1.0);
+            let glyph = get_glyph(&font, glyph_id, code, ctx, resources);
 
             ctx.glyph_scratch.push(PositionedGlyph { glyph, transform });
         }
@@ -80,9 +78,16 @@ pub(crate) fn show_glyph_run<'a>(ctx: &mut Context<'a>, device: &mut impl Device
     let fill_props = ctx.draw_props(false);
     let stroke_draw_props = ctx.draw_props(true);
 
+    let writing_mode = if ctx.text_state().font_horizontal() {
+        WritingMode::Horizontal
+    } else {
+        WritingMode::Vertical
+    };
+
     let clip_path = {
         let run = GlyphRun {
             glyphs: &ctx.glyph_scratch,
+            writing_mode,
         };
 
         let clip_path = if matches!(
@@ -113,8 +118,7 @@ pub(crate) fn show_glyph_run<'a>(ctx: &mut Context<'a>, device: &mut impl Device
                 device.draw_glyph_run(&run, stroke_draw_props, &DrawMode::Stroke(stroke_props));
             }
             TextRenderingMode::Invisible => {
-                // Still call draw_glyph_run for invisible text, so that it can
-                // for example be used for text extraction.
+                // Invisible text still reaches the device, e.g. for text extraction.
                 device.draw_glyph_run(&run, fill_props, &DrawMode::Invisible);
             }
             TextRenderingMode::FillAndClip => {
@@ -128,9 +132,8 @@ pub(crate) fn show_glyph_run<'a>(ctx: &mut Context<'a>, device: &mut impl Device
                 device.draw_glyph_run(&run, stroke_draw_props, &DrawMode::Stroke(stroke_props));
             }
             TextRenderingMode::Clip => {
-                // Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
-                // Nothing is painted, but the glyphs are still text on the page: pass them
-                // on as invisible, as mode 3 is, so that devices extracting text see them.
+                // TODO: Pass clipping-only text with its own draw mode, so that devices
+                // can tell it apart from invisible text.
                 device.draw_glyph_run(&run, fill_props, &DrawMode::Invisible);
             }
         }
@@ -155,9 +158,7 @@ fn clip_glyph(clip_path: &mut BezPath, glyph: &PositionedGlyph<'_>) {
                 clip_path.extend(outline);
             }
         }
-        Glyph::Type3(_) => {
-            warn!("text rendering mode clip not implemented for shape glyphs");
-        }
+        Glyph::Type3(_) => {}
     }
 }
 

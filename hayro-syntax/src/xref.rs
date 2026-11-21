@@ -38,7 +38,6 @@ pub(crate) enum XRefError {
     Encryption(DecryptionError),
 }
 
-/// Parse the "root" xref from the PDF.
 pub(crate) fn root_xref(data: PdfData, password: &[u8]) -> Result<XRef, XRefError> {
     let mut xref_map = FxHashMap::default();
     let xref_pos = find_last_xref_pos(data.as_ref()).ok_or(XRefError::Unknown)?;
@@ -54,18 +53,12 @@ pub(crate) fn root_xref(data: PdfData, password: &[u8]) -> Result<XRef, XRefErro
     )
 }
 
-/// Try to manually parse the PDF to build an xref table and trailer dictionary.
 pub(crate) fn fallback(data: PdfData, password: &[u8]) -> Option<XRef> {
-    warn!("xref table was invalid, trying to manually build xref table");
     let (xref_map, xref_input) = fallback_xref_map(&data, password);
 
     if let Some(xref_input) = xref_input {
-        warn!("rebuild xref table with {} entries", xref_map.len());
-
         XRef::new(data.clone(), xref_map, xref_input, true, password).ok()
     } else {
-        warn!("couldn't find trailer dictionary, failed to rebuild xref table");
-
         None
     }
 }
@@ -93,11 +86,9 @@ fn fallback_xref_map_inner<'a>(
 
         let mut old_r = r.clone();
 
-        // First try to check if we have an object identifier.
         if r.peek_byte().is_some_and(|b: u8| b.is_ascii_digit()) {
             if let Some(obj_id) = r.read::<ObjectIdentifier>(&dummy_ctx) {
                 let mut cloned = r.clone();
-                // Check that the object following it is actually valid before inserting it.
                 cloned.skip_white_spaces_and_comments();
                 if cloned.skip::<Object<'_>>(false).is_some() {
                     xref_map.insert(obj_id, EntryType::Normal(cur_pos));
@@ -105,12 +96,9 @@ fn fallback_xref_map_inner<'a>(
                     dummy_ctx.set_obj_number(obj_id);
                 }
             } else {
-                // There must be a white space before the next object number.
                 r.forward_while(|b| !is_white_space_character(b));
             }
         } else {
-            // Then, try to check whether we have a dictionary, in particular a trailer
-            // dictionary.
             let mut probe_reader = r.clone();
             if r.peek_bytes(2).is_some_and(|b| b == b"<<")
                 && let Some(probe) =
@@ -137,26 +125,23 @@ fn fallback_xref_map_inner<'a>(
                                 after_dict.skip_white_spaces_and_comments();
                                 after_dict.forward_tag(b"stream").is_some()
                             }
-                            && let Some(stream) = old_r.read::<Stream<'_>>(&dummy_ctx)
+                            && let Some(stream) = old_r.read_indirect::<Stream<'_>>(&dummy_ctx)
                             && let Some(last_obj_num) = last_obj_num
                             && let Some(obj_stream) = ObjectStream::new(&stream)
                         {
-                            for (idx, (obj_num, _)) in obj_stream.offsets.iter().enumerate() {
-                                let id = ObjectIdentifier::new(*obj_num as i32, 0);
-                                // If we already found an entry for that object number that was not
-                                // inside an object stream. Somewhat arbitrary and maybe
-                                // we can do better, but that seems to work for the current
-                                // set of tests.
+                            for (idx, (obj_num, offset)) in obj_stream.offsets.iter().enumerate() {
+                                if offset.is_none() {
+                                    continue;
+                                }
+
+                                let id = ObjectIdentifier::new(*obj_num, 0);
                                 if xref_map
                                     .get(&id)
                                     .is_none_or(|e| !matches!(e, &EntryType::Normal(_)))
                                 {
                                     xref_map.insert(
                                         id,
-                                        EntryType::ObjStream(
-                                            last_obj_num.obj_number as u32,
-                                            idx as u32,
-                                        ),
+                                        EntryType::ObjStream(last_obj_num.obj_number, idx as u32),
                                     );
                                 }
                             }
@@ -164,9 +149,6 @@ fn fallback_xref_map_inner<'a>(
                     }
                 }
             } else {
-                // We can skip everything until the next white space character,
-                // as there cannot possibly be any new dictionary/object identifier
-                // until then.
                 let old_pos = r.offset;
                 r.forward_while(|b| !is_white_space_character(b));
                 if r.offset == old_pos {
@@ -180,7 +162,6 @@ fn fallback_xref_map_inner<'a>(
         }
     }
 
-    // Try to choose the right trailer dict by doing basic validation.
     let mut trailer_dict = None;
 
     for dict in trailer_dicts {
@@ -204,7 +185,7 @@ fn fallback_xref_map_inner<'a>(
                     }
                     Some(EntryType::ObjStream(obj_num, idx)) => {
                         if let Some(EntryType::Normal(offset)) =
-                            xref_map.get(&ObjectIdentifier::new(*obj_num as i32, 0))
+                            xref_map.get(&ObjectIdentifier::new(*obj_num, 0))
                         {
                             let mut reader = Reader::new(&data.as_ref()[*offset..]);
 
@@ -241,10 +222,7 @@ fn fallback_xref_map_inner<'a>(
         .is_some_and(|t| t.contains_key(ENCRYPT));
 
     if has_encryption && recurse {
-        // The problem is that in this case, we have used a dummy reader context which does not have
-        // a decryptor. Therefore, we were unable to decrypt any of the object streams and missed
-        // all objects that are inside of such a stream. Therefore, we need to redo the process
-        // using a `ReaderContext` that does have the ability to decrypt.
+        // Redo with a decrypting context to find objects in encrypted object streams.
         if let Ok(xref) = XRef::new(
             data.clone(),
             xref_map.clone(),
@@ -284,9 +262,7 @@ impl XRef {
         repaired: bool,
         password: &[u8],
     ) -> Result<Self, XRefError> {
-        // This is a bit hacky, but the problem is we can't read the resolved trailer dictionary
-        // before we actually created the xref struct. So we first create it using dummy data
-        // and then populate the data.
+        // The trailer can only be resolved once the xref exists.
         let trailer_data = TrailerData::dummy();
 
         let mut xref = Self(Inner::Some(Arc::new(SomeRepr {
@@ -299,9 +275,7 @@ impl XRef {
             password: password.to_vec(),
         })));
 
-        // We read the trailer twice, once to determine the encryption used and then a second
-        // time to resolve the catalog dictionary, etc. This allows us to support catalog dictionaries
-        // that are stored in an encrypted object stream.
+        // Read the trailer twice so the catalog can be in an encrypted object stream.
 
         let decryptor = {
             match input {
@@ -435,7 +409,7 @@ impl XRef {
                             EntryType::Normal(o) => (*o, 0),
                             EntryType::ObjStream(id, index) => {
                                 if let Some(EntryType::Normal(offset)) =
-                                    locked.xref_map.get(&ObjectIdentifier::new(*id as i32, 0))
+                                    locked.xref_map.get(&ObjectIdentifier::new(*id, 0))
                                 {
                                     (*offset, *index)
                                 } else {
@@ -448,8 +422,6 @@ impl XRef {
                     })
                     .collect::<Vec<_>>();
 
-                // Try to yield in the order the objects appeared in the
-                // PDF.
                 elements.sort_by_key(|e1| e1.1);
 
                 let mut iter = elements.into_iter();
@@ -459,7 +431,6 @@ impl XRef {
                         if let Some(obj) = self.get_with(next.0, &ReaderContext::new(self, false)) {
                             return Some(obj);
                         } else {
-                            // Skip invalid objects.
                             continue;
                         }
                     }
@@ -504,7 +475,7 @@ impl XRef {
         &self,
         id: ObjectIdentifier,
         data: &[u8],
-        target: DecryptionTarget,
+        target: DecryptionTarget<'_>,
     ) -> Option<Vec<u8>> {
         match &self.0 {
             Inner::Dummy => Some(data.to_vec()),
@@ -522,7 +493,6 @@ impl XRef {
         self.get_with(id, &ctx)
     }
 
-    /// Return the object with the given identifier.
     #[allow(private_bounds)]
     pub(crate) fn get_with<'a, T>(
         &'a self,
@@ -539,11 +509,11 @@ impl XRef {
         // The flag must describe the map this entry came from.
         let (entry, was_repaired) = {
             let locked = repr.map.get();
-            // References to undefined objects are treated as null.
             (*locked.xref_map.get(&id)?, locked.repaired)
         };
 
         let mut r = Reader::new(repr.data.get().as_ref());
+        let caller_ctx = ctx;
         let mut ctx = ctx.clone();
         ctx.set_obj_number(id);
         ctx.set_in_content_stream(false);
@@ -558,74 +528,63 @@ impl XRef {
                         return Some(object.get());
                     }
                 } else {
-                    // There is a valid object at the offset, it's just not of the type the caller
-                    // expected, which is fine.
+                    // A valid object of another type needs no repair.
                     if r.skip::<IndirectObject<Object<'_>>>(false).is_some() {
                         return None;
                     }
                 };
 
-                // The xref table is broken, try to repair if not already repaired.
-                if was_repaired {
-                    error!(
-                        "attempt was made at repairing xref, but object {id:?} still couldn't be read"
-                    );
-
-                    None
-                } else {
-                    warn!("broken xref, attempting to repair");
-
-                    self.repair();
-
-                    // Now try reading again.
-                    self.get_with::<T>(id, &ctx)
-                }
+                self.repair_and_get(id, caller_ctx, was_repaired)
             }
             EntryType::ObjStream(obj_stram_gen_num, index) => {
-                // Generation number is implicitly 0.
-                let obj_stream_id = ObjectIdentifier::new(obj_stram_gen_num as i32, 0);
+                let obj_stream_id = ObjectIdentifier::new(obj_stram_gen_num, 0);
 
                 if obj_stream_id == id || ctx.parent_chain_contains(&id) {
-                    warn!("cycle detected in object stream");
-
                     return None;
                 }
 
-                // An object stream is a stream, so it can't itself be stored in an object
-                // stream (ISO 32000-2, 7.5.7).
                 if !matches!(
                     repr.map.get().xref_map.get(&obj_stream_id),
                     Some(EntryType::Normal(_))
                 ) {
-                    warn!("object stream {obj_stream_id:?} is not a top-level object");
-
                     return None;
                 }
 
                 ctx.parent_chain_push(id);
 
-                repr.data
-                    .object_stream(obj_stream_id, &ctx)?
-                    .get(index, &ctx)
+                let object_stream = repr.data.object_stream(obj_stream_id, &ctx)?;
+
+                if object_stream.obj_number(index) == Some(id.obj_number) {
+                    return object_stream.get(index, &ctx);
+                }
+
+                self.repair_and_get(id, caller_ctx, was_repaired)
             }
+        }
+    }
+
+    fn repair_and_get<'a, T>(
+        &'a self,
+        id: ObjectIdentifier,
+        ctx: &ReaderContext<'a>,
+        was_repaired: bool,
+    ) -> Option<T>
+    where
+        T: ObjectLike<'a>,
+    {
+        if was_repaired {
+            None
+        } else {
+            self.repair();
+
+            self.get_with::<T>(id, ctx)
         }
     }
 }
 
-/// An input that is passed to the xref constructor so that we can fully resolve
-/// the PDF.
 #[derive(Debug, Copy, Clone)]
 pub(crate) enum XRefInput<'a> {
-    /// This option is going to be uesd in 99.999% of the case. It contains the
-    /// raw data of the trailer dictionary which is then going to be processed.
     TrailerDictData(&'a [u8]),
-    /// In case the trailer dictionary could not be read (for example because
-    /// it is cut-off), we just pass the object ID of the root dictionary
-    /// in case we have found one, and try our best to build the PDF just
-    /// with the information we have there.
-    ///
-    /// Note that this won't work if the document is encrypted, as we
-    /// can't access the crypto dictionary.
     RootRef(ObjectIdentifier),
 }
 
@@ -639,20 +598,14 @@ pub(crate) fn find_last_xref_pos(data: &[u8]) -> Option<usize> {
     finder.read_without_context::<i32>()?.try_into().ok()
 }
 
-/// A type of xref entry.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum EntryType {
-    /// An indirect object that is at a specific offset in the original data.
     Normal(usize),
-    /// An indirect object that is part of an object stream. First number indicates the object
-    /// number of the _object stream_ (the generation number is always 0), the second number indicates
-    /// the index in the object stream.
     ObjStream(u32, u32),
 }
 
 type XrefMap = FxHashMap<ObjectIdentifier, EntryType>;
 
-/// Representation of a proper xref table.
 #[derive(Debug)]
 struct MapRepr {
     xref_map: XrefMap,
@@ -689,9 +642,7 @@ struct SomeRepr {
 
 #[derive(Debug, Clone)]
 enum Inner {
-    /// A dummy xref table that doesn't have any entries.
     Dummy,
-    /// A proper xref table.
     Some(Arc<SomeRepr>),
 }
 
@@ -738,7 +689,6 @@ fn populate_xref_impl<'a>(data: &'a [u8], pos: usize, xref_map: &mut XrefMap) ->
     populate_xref_impl_inner(data, pos, xref_map, &mut visited)
 }
 
-/// Maximum number of allowed xref `Prev` pointers before we abort.
 const MAX_XREF_CHAIN_DEPTH: usize = 256;
 
 fn populate_xref_impl_inner<'a>(
@@ -748,17 +698,10 @@ fn populate_xref_impl_inner<'a>(
     visited: &mut BTreeSet<usize>,
 ) -> Option<&'a [u8]> {
     if !visited.insert(pos) {
-        warn!("circular xref PREV chain detected at offset {}", pos);
-
         return None;
     }
 
     if visited.len() > MAX_XREF_CHAIN_DEPTH {
-        warn!(
-            "xref PREV chain exceeds maximum depth of {}",
-            MAX_XREF_CHAIN_DEPTH
-        );
-
         return None;
     }
 
@@ -796,7 +739,6 @@ impl Readable<'_> for SubsectionHeader {
     }
 }
 
-/// Populate the xref table, and return the trailer dict.
 fn populate_from_xref_table<'a>(
     data: &'a [u8],
     reader: &mut Reader<'a>,
@@ -815,12 +757,10 @@ fn populate_from_xref_table<'a>(
     let mut max_obj = 0;
 
     if let Some(prev) = trailer.get::<i32>(PREV) {
-        // First insert the entries from any previous xref tables.
         populate_xref_impl_inner(data, prev as usize, insert_map, visited)?;
     }
 
-    // In hybrid files, entries in `XRefStm` should have higher priority, therefore we insert them
-    // after looking at `PREV`.
+    // In hybrid files, `XRefStm` entries override `Prev` ones.
     if let Some(xref_stm) = trailer.get::<i32>(XREF_STM) {
         populate_xref_impl_inner(data, xref_stm as usize, insert_map, visited)?;
     }
@@ -836,11 +776,10 @@ fn populate_from_xref_table<'a>(
             let bytes = reader.read_bytes(XREF_ENTRY_LEN)?;
             let entry = XRefEntry::read(bytes)?;
 
-            // Specification says we should ignore any object number > SIZE, but probably
-            // not important?
+            // Entries beyond `Size` are not ignored.
             if entry.used {
                 insert_map.insert(
-                    ObjectIdentifier::new(obj_number as i32, entry.gen_number),
+                    ObjectIdentifier::new(obj_number, entry.gen_number),
                     EntryType::Normal(entry.offset),
                 );
             }
@@ -861,7 +800,6 @@ fn populate_from_xref_stream<'a>(
         .get();
 
     if let Some(prev) = stream.dict().get::<i32>(PREV) {
-        // First insert the entries from any previous xref tables.
         let _ = populate_xref_impl_inner(data, prev as usize, insert_map, visited)?;
     }
 
@@ -869,18 +807,11 @@ fn populate_from_xref_stream<'a>(
 
     let [f1_len, f2_len, f3_len] = stream.dict().get::<[u8; 3]>(W)?;
 
-    if f2_len > size_of::<u64>() as u8 {
-        error!("xref offset length is larger than the allowed limit");
-
+    if f2_len == 0 || f2_len > size_of::<u64>() as u8 {
         return None;
     }
 
-    // Do such files exist?
-    if f1_len != 1 {
-        warn!("first field in xref stream was longer than 1");
-    }
-
-    let xref_data = stream.decoded().ok()?;
+    let xref_data = stream.decoded_data().ok()?;
     let mut xref_reader = Reader::new(xref_data.as_ref());
 
     if let Some(arr) = stream.dict().get::<Array<'_>>(INDEX) {
@@ -923,14 +854,10 @@ fn xref_stream_num(data: &[u8]) -> Option<u32> {
             if let Ok(num) = u32::try_from(u64::from_be_bytes(data[0..8].try_into().ok()?)) {
                 return Some(num);
             } else {
-                warn!("xref stream number is too large");
-
                 return None;
             }
         }
         _n => {
-            warn!("invalid xref stream number {_n}");
-
             return None;
         }
     })
@@ -949,14 +876,13 @@ fn xref_stream_subsection<'a>(
         let f_type = if f1_len == 0 {
             1
         } else {
-            // We assume a length of 1.
+            // TODO: Support a first-field width other than 1.
             xref_reader.read_bytes(1)?[0]
         };
 
-        let obj_number = start + i;
+        let obj_number = start.checked_add(i)?;
 
         match f_type {
-            // We don't care about free objects.
             0 => {
                 xref_reader.skip_bytes(f2_len as usize + f3_len as usize)?;
             }
@@ -976,7 +902,7 @@ fn xref_stream_subsection<'a>(
                 };
 
                 insert_map.insert(
-                    ObjectIdentifier::new(obj_number as i32, gen_number as i32),
+                    ObjectIdentifier::new(obj_number, gen_number as i32),
                     EntryType::Normal(offset as usize),
                 );
             }
@@ -994,13 +920,11 @@ fn xref_stream_subsection<'a>(
                 };
 
                 insert_map.insert(
-                    ObjectIdentifier::new(obj_number as i32, gen_number),
+                    ObjectIdentifier::new(obj_number, gen_number),
                     EntryType::ObjStream(obj_stream_number, index),
                 );
             }
             _ => {
-                warn!("xref has unknown field type {f_type}");
-
                 return None;
             }
         }
@@ -1037,7 +961,6 @@ fn get_decryptor(trailer_dict: &Dict<'_>, password: &[u8]) -> Result<Decryptor, 
         {
             id.to_vec()
         } else {
-            // Assume an empty ID entry.
             vec![]
         };
 
@@ -1049,45 +972,59 @@ fn get_decryptor(trailer_dict: &Dict<'_>, password: &[u8]) -> Result<Decryptor, 
 
 pub(crate) struct ObjectStream {
     data: Vec<u8>,
-    offsets: Vec<(u32, usize)>,
+    offsets: Vec<(u32, Option<usize>)>,
 }
 
 impl ObjectStream {
     pub(crate) fn new(stream: &Stream<'_>) -> Option<Self> {
-        let data = stream.decoded().ok()?.into_owned();
+        let data = stream.decoded_data().ok()?.into_owned();
         let offsets = Self::read_offsets(stream, &data).unwrap_or_default();
 
         Some(Self { data, offsets })
     }
 
-    fn read_offsets(stream: &Stream<'_>, data: &[u8]) -> Option<Vec<(u32, usize)>> {
+    fn read_offsets(stream: &Stream<'_>, data: &[u8]) -> Option<Vec<(u32, Option<usize>)>> {
         let num_objects = stream.dict().get::<usize>(N)?;
         let first_offset = stream.dict().get::<usize>(FIRST)?;
 
         let mut r = Reader::new(data);
 
         let mut offsets = vec![];
+        let mut last_offset = None;
 
         for _ in 0..num_objects {
             r.skip_white_spaces_and_comments();
-            // Skip object number
             let obj_num = r.read_without_context::<u32>()?;
             r.skip_white_spaces_and_comments();
             let relative_offset = r.read_without_context::<usize>()?;
-            offsets.push((obj_num, first_offset + relative_offset));
+            let offset = first_offset + relative_offset;
+
+            // Offsets must strictly increase, or members could overlap.
+            if offset >= data.len() || last_offset.is_some_and(|last| offset <= last) {
+                offsets.push((obj_num, None));
+            } else {
+                let mut member = Reader::new(data);
+                member.jump(offset);
+                member.skip_white_spaces_and_comments();
+                last_offset = Some(member.offset());
+                offsets.push((obj_num, Some(member.offset())));
+            }
         }
 
         Some(offsets)
+    }
+
+    fn obj_number(&self, index: u32) -> Option<u32> {
+        Some(self.offsets.get(index as usize)?.0)
     }
 
     fn get<'a, T>(&'a self, index: u32, ctx: &ReaderContext<'a>) -> Option<T>
     where
         T: ObjectLike<'a>,
     {
-        let offset = self.offsets.get(index as usize)?.1;
+        let offset = self.offsets.get(index as usize)?.1?;
         let mut r = Reader::new(&self.data);
         r.jump(offset);
-        r.skip_white_spaces_and_comments();
 
         let mut ctx = ctx.clone();
         ctx.set_in_object_stream(true);
@@ -1160,5 +1097,15 @@ mod tests {
         let data = b"xref\n0 999999999999999999999\ntrailer\n<<>>";
         let mut reader = Reader::new(data);
         assert!(read_xref_table_trailer(&mut reader, &ReaderContext::dummy()).is_none());
+    }
+
+    #[test]
+    fn xref_stream_subsection_rejects_overflowing_object_number() {
+        let data = [1, 0, 1, 0];
+        let mut xref_map = FxHashMap::default();
+        let result =
+            xref_stream_subsection(&mut Reader::new(&data), u32::MAX, 2, 1, 1, 0, &mut xref_map);
+        assert!(result.is_none());
+        assert!(xref_map.contains_key(&ObjectIdentifier::new(u32::MAX, 0)));
     }
 }

@@ -10,13 +10,7 @@ use std::sync::Arc;
 use vello_cpu::peniko::{Compose, Fill, ImageQuality, ImageSampler, Mix};
 use vello_cpu::{Image, ImageSource, Mask, PixelMetadata, Pixmap, peniko};
 
-// Previously, we used `CatmullRom`. The problem with that one is that it
-// can have negative weights. If we pass a premultiplied buffer to
-// `pic-scale`, it can happen that any of the RGB variants end up
-// slightly larger than the alpha channel, leading to pixel artifacts when
-// rendering. In order to avoid having to do another pass over the buffer
-// to clamp, we instead use Hermite, which has similar quality but doesn't
-// have this problem.
+// Hermite has no negative weights, so resampled premultiplied color never exceeds alpha.
 pub(super) const RESAMPLING_FUNCTION: ResamplingFunction = ResamplingFunction::Hermite;
 
 #[derive(Clone, Copy)]
@@ -109,10 +103,7 @@ impl Renderer<'_> {
             None,
         );
         self.ctx.set_transform(mask_transform);
-        // Note that there is a circle between `draw_image` and `draw_image_with_alpha_mask`,
-        // but `draw_image_with_alpha_mask` is only called if the dimensions or interpolate
-        // values between alpha_data and rgb_data don't match. Here we use a
-        // `SolidColorImage` so it doesn't affect it.
+        // No recursion: the solid image's size and interpolation always match `alpha_data`.
         self.draw_image(RenderImageData::Solid(mask_image), Some(alpha_data));
         self.ctx.pop_layer();
         self.ctx.pop_layer();
@@ -166,8 +157,6 @@ impl Renderer<'_> {
             (img_width, img_height)
         };
 
-        // For luma images without alpha, we can resize as single-channel and
-        // expand to RGBA afterwards, which is ~4x faster.
         let mut needs_premultiplication = has_alpha;
         let mut rgba_data = if matches!(&image_data, RenderImageData::Solid(_)) && has_alpha {
             let RenderImageData::Solid(solid) = image_data else {
@@ -196,13 +185,12 @@ impl Renderer<'_> {
                 resized_alpha
             };
 
-            let mut out = Vec::with_capacity(img_width as usize * img_height as usize * 4);
-            for a in alpha_data {
-                out.extend_from_slice(&[solid.color[0], solid.color[1], solid.color[2], a]);
-            }
-            out
+            let [r, g, b] = solid.color;
+            alpha_data
+                .iter()
+                .flat_map(|a| [r, g, b, *a])
+                .collect::<Vec<_>>()
         } else if matches!(&image_data, RenderImageData::Luma(_)) && !has_alpha {
-            // We cannot lift this up due to borrowing issues.
             let RenderImageData::Luma(luma) = image_data else {
                 unreachable!()
             };
@@ -228,10 +216,11 @@ impl Renderer<'_> {
                 resized
             };
 
-            luma_data
-                .iter()
-                .flat_map(|g| [*g, *g, *g, 255])
-                .collect::<Vec<_>>()
+            let mut out = vec![0; luma_data.len() * 4];
+            for (out, g) in out.as_chunks_mut::<4>().0.iter_mut().zip(&luma_data) {
+                *out = [*g, *g, *g, 255];
+            }
+            out
         } else if matches!(&image_data, RenderImageData::Luma(_)) && has_alpha {
             let RenderImageData::Luma(luma) = image_data else {
                 unreachable!()
@@ -239,11 +228,11 @@ impl Renderer<'_> {
             let alpha = alpha_data.unwrap();
 
             if !needs_resize {
-                let mut out = Vec::with_capacity(img_width as usize * img_height as usize * 4);
-                for (g, a) in luma.data.iter().zip(alpha.data) {
-                    out.extend_from_slice(&[*g, *g, *g, a]);
-                }
-                out
+                luma.data
+                    .iter()
+                    .zip(&alpha.data)
+                    .flat_map(|(g, a)| [*g, *g, *g, *a])
+                    .collect::<Vec<_>>()
             } else {
                 let resized = downscale_with_alpha::<1>(
                     self.global.level,
@@ -291,11 +280,12 @@ impl Renderer<'_> {
                     new_height,
                     ImagePixelFormat::Rgb,
                 );
-                let mut out = Vec::with_capacity(new_width as usize * new_height as usize * 4);
-                for px in resized.as_chunks::<3>().0 {
-                    out.extend_from_slice(&[px[0], px[1], px[2], 255]);
-                }
-                out
+                resized
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
+                    .collect::<Vec<_>>()
             };
             additional_transform = Affine::scale_non_uniform(
                 img_width as f64 / new_width as f64,
@@ -308,19 +298,16 @@ impl Renderer<'_> {
             let (rgb_data, alpha_data) = match image_data {
                 RenderImageData::Rgb(rgb) => (rgb.data, alpha_data.map(|a| a.data)),
                 RenderImageData::Luma(luma) => {
-                    let rgb = luma
-                        .data
-                        .iter()
-                        .flat_map(|g| [*g, *g, *g])
-                        .collect::<Vec<_>>();
+                    let mut rgb = vec![0; luma.data.len() * 3];
+                    for (rgb, g) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(&luma.data) {
+                        *rgb = [*g, *g, *g];
+                    }
                     (rgb, alpha_data.map(|a| a.data))
                 }
                 RenderImageData::Solid(solid) => {
-                    let mut rgb =
-                        Vec::with_capacity(solid.width as usize * solid.height as usize * 3);
-                    for _ in 0..solid.width as usize * solid.height as usize {
-                        rgb.extend_from_slice(&solid.color);
-                    }
+                    let rgb = solid
+                        .color
+                        .repeat(solid.width as usize * solid.height as usize);
                     (rgb, alpha_data.map(|a| a.data))
                 }
             };
@@ -370,11 +357,7 @@ impl Renderer<'_> {
             premultiply_rgba(self.global.level, &mut rgba_data);
         }
 
-        // The problem is that by default, when applying a bilinear or bicubic scaling, we will
-        // sample pixels using an extend (pad/reflect/repeat). For glyphs, this is undesirable
-        // as the glyphs will look very bold. Therefore, for glyphs it is more desirable to sample
-        // a transparent pixel when reaching the border. Thus, we wrap glyphs in a transparent frame
-        // of pixel width 2.
+        // Pad Type3 glyph images with transparent pixels so edge sampling doesn't make them look bold.
         if self.in_type3_glyph {
             let mut padded_image = vec![];
             padded_image.extend(vec![0; (4 * img_width as usize + 16) * 2]);
@@ -434,6 +417,11 @@ impl Renderer<'_> {
         image: hayro_interpret::Image<'a, '_>,
         props: ImageDrawProps<'a>,
     ) {
+        let local = Rect::new(0.0, 0.0, image.width() as f64, image.height() as f64);
+        if self.misses_target(props.transform.transform_rect_bbox(local)) {
+            return;
+        }
+
         self.apply_image_props(&props);
         let mut transform = props.transform;
         self.ctx.set_paint_transform(Affine::IDENTITY);
@@ -559,7 +547,8 @@ impl Renderer<'_> {
             }
         }
 
-        self.ctx.set_aliasing_threshold(None);
+        self.ctx
+            .set_aliasing_threshold(self.global.aliasing_threshold);
     }
 }
 
@@ -682,15 +671,17 @@ fn downscale_with_alpha<const N: usize>(
         ImagePixelFormat::Luma,
     );
 
-    let mut out = Vec::with_capacity(new_width as usize * new_height as usize * 4);
-    for (pixel, a) in color.as_chunks::<N>().0.iter().zip(alpha) {
-        match pixel.as_slice() {
-            [g] => out.extend_from_slice(&[*g, *g, *g, a]),
-            [r, g, b] => out.extend_from_slice(&[*r, *g, *b, a]),
+    color
+        .as_chunks::<N>()
+        .0
+        .iter()
+        .zip(alpha)
+        .flat_map(|(pixel, a)| match pixel.as_slice() {
+            [g] => [*g, *g, *g, a],
+            [r, g, b] => [*r, *g, *b, a],
             _ => unreachable!(),
-        }
-    }
-    out
+        })
+        .collect()
 }
 
 fn premultiply_with_alpha<const N: usize>(level: Level, color: &mut [u8], alpha: &[u8]) {
@@ -725,20 +716,29 @@ fn premultiply_with_alpha<const N: usize>(level: Level, color: &mut [u8], alpha:
             ],
         ];
 
+        let [i0, i1, i2] = ALPHA_INDICES;
+        let (i0, i1, i2) = (i0.simd_into(simd), i1.simd_into(simd), i2.simd_into(simd));
+
         for (rgb, alpha) in rgb
             .as_chunks_mut::<96>()
             .0
             .iter_mut()
             .zip(alpha.as_chunks::<32>().0)
         {
-            let (alpha_low, alpha_high) = simd.split_u8x32(u8x32::from_slice(simd, alpha));
-            let [[a0, a1, a2], [a3, a4, a5]] = [alpha_low, alpha_high].map(|alpha| {
-                ALPHA_INDICES.map(|indices| simd.swizzle_dyn_u8x16(alpha, indices.simd_into(simd)))
-            });
+            let (low, high) = simd.split_u8x32(u8x32::from_slice(simd, alpha));
             let alphas = [
-                simd.combine_u8x16(a0, a1),
-                simd.combine_u8x16(a2, a3),
-                simd.combine_u8x16(a4, a5),
+                simd.combine_u8x16(
+                    simd.swizzle_dyn_u8x16(low, i0),
+                    simd.swizzle_dyn_u8x16(low, i1),
+                ),
+                simd.combine_u8x16(
+                    simd.swizzle_dyn_u8x16(low, i2),
+                    simd.swizzle_dyn_u8x16(high, i0),
+                ),
+                simd.combine_u8x16(
+                    simd.swizzle_dyn_u8x16(high, i1),
+                    simd.swizzle_dyn_u8x16(high, i2),
+                ),
             ];
 
             for (rgb, alpha) in rgb.as_chunks_mut::<32>().0.iter_mut().zip(alphas) {

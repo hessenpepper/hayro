@@ -14,8 +14,6 @@ use crate::content::macros::{op_all, op_impl, op0, op1, op2, op3, op4, op6};
 
 include!("ops_generated.rs");
 
-// Need to special-case those because they have variable arguments.
-
 fn parse_named_color<'b, 'a>(
     objects: &'b [Object<'a>],
 ) -> Option<(
@@ -30,8 +28,6 @@ fn parse_named_color<'b, 'a>(
             Object::Number(n) => nums.push(*n),
             Object::Name(n) => name = Some(n),
             _ => {
-                warn!("encountered unknown object {o:?} when parsing scn/SCN");
-
                 return None;
             }
         }
@@ -259,6 +255,24 @@ f
             other => panic!("unexpected instruction: {other:?}"),
         }
 
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn scn_device_n_pattern() {
+        let input = [b"0.5 ".repeat(32), b"/P0 scn 0 0 m".to_vec()].concat();
+
+        let mut iter = TypedIter::new(&input);
+
+        match iter.next() {
+            Some(TypedInstruction::NonStrokeColorNamed(NonStrokeColorNamed(nums, Some(name)))) => {
+                assert_eq!(nums.as_slice(), &[Number::from_f32(0.5); 32]);
+                assert_eq!(name.as_ref(), b"P0");
+            }
+            other => panic!("unexpected instruction: {other:?}"),
+        }
+
+        assert!(matches!(iter.next(), Some(TypedInstruction::MoveTo(_))));
         assert!(iter.next().is_none());
     }
 

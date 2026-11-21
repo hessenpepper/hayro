@@ -23,8 +23,6 @@ mod parse;
 pub use bcmap::load_embedded;
 
 /// Look up an embedded binary cmap by name.
-///
-/// Returns `None` when the `embed-cmaps` feature is not enabled.
 #[cfg(not(feature = "embed-cmaps"))]
 pub fn load_embedded(_name: CMapName<'_>) -> Option<&'static [u8]> {
     None
@@ -40,7 +38,6 @@ pub type Cid = u32;
 /// The name of the cmap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CMapName<'a> {
-    // ── Adobe-Japan1 (Japanese) ── Shift-JIS (RKSJ) encodings ──
     /// `83pv-RKSJ-H` — Adobe-Japan1, Mac Shift-JIS (`KanjiTalk` 6), horizontal.
     N83pvRksjH,
     /// `90ms-RKSJ-H` — Adobe-Japan1, Windows Shift-JIS (code page 932), horizontal.
@@ -58,9 +55,6 @@ pub enum CMapName<'a> {
     /// `Add-RKSJ-V` — Adobe-Japan1, Fujitsu FMR Shift-JIS, vertical.
     AddRksjV,
 
-    // ── Adobe UCS2 (CID → Unicode) ──
-    // Note that these are not part of the predefined CMaps, but we use them
-    // so we can more easily map CIDs back to Unicode.
     /// `Adobe-CNS1-UCS2` — Adobe-CNS1, CID-to-Unicode mapping.
     AdobeCns1Ucs2,
     /// `Adobe-GB1-UCS2` — Adobe-GB1, CID-to-Unicode mapping.
@@ -70,7 +64,6 @@ pub enum CMapName<'a> {
     /// `Adobe-Korea1-UCS2` — Adobe-Korea1, CID-to-Unicode mapping.
     AdobeKorea1Ucs2,
 
-    // ── Adobe-CNS1 (Traditional Chinese) ── Big Five encodings ──
     /// `B5pc-H` — Adobe-CNS1, Mac Big Five (`ETen` extensions), horizontal.
     B5pcH,
     /// `B5pc-V` — Adobe-CNS1, Mac Big Five (`ETen` extensions), vertical.
@@ -88,7 +81,6 @@ pub enum CMapName<'a> {
     /// `ETenms-B5-V` — Adobe-CNS1, `ETen` Big Five with Microsoft symbol extensions, vertical.
     ETenmsB5V,
 
-    // ── Adobe-Japan1 (Japanese) ── EUC and extended Shift-JIS encodings ──
     /// `EUC-H` — Adobe-Japan1, JIS X 0208 EUC-JP encoding, horizontal.
     EucH,
     /// `EUC-V` — Adobe-Japan1, JIS X 0208 EUC-JP encoding, vertical.
@@ -98,7 +90,6 @@ pub enum CMapName<'a> {
     /// `Ext-RKSJ-V` — Adobe-Japan1, Shift-JIS with NEC/IBM extensions, vertical.
     ExtRksjV,
 
-    // ── Adobe-GB1 (Simplified Chinese) ──
     /// `GB-EUC-H` — Adobe-GB1, GB 2312-80 EUC encoding, horizontal.
     GbEucH,
     /// `GB-EUC-V` — Adobe-GB1, GB 2312-80 EUC encoding, vertical.
@@ -120,25 +111,19 @@ pub enum CMapName<'a> {
     /// `GBpc-EUC-V` — Adobe-GB1, Mac GB 2312 (simplified) EUC encoding, vertical.
     GbpcEucV,
 
-    // ── Adobe-Japan1 (Japanese) ── JIS encoding ──
     /// `H` — Adobe-Japan1, JIS X 0208 row-cell encoding, horizontal.
     H,
 
-    // ── Adobe-CNS1 (Traditional Chinese) ── Hong Kong SCS ──
     /// `HKscs-B5-H` — Adobe-CNS1, Hong Kong SCS (Big Five with HKSCS extensions), horizontal.
     HKscsB5H,
     /// `HKscs-B5-V` — Adobe-CNS1, Hong Kong SCS (Big Five with HKSCS extensions), vertical.
     HKscsB5V,
 
-    // ── Adobe-Identity ──
     /// `Identity-H` — Adobe-Identity, two-byte identity mapping, horizontal.
-    /// Character codes map directly to CIDs (i.e. CID = character code).
     IdentityH,
     /// `Identity-V` — Adobe-Identity, two-byte identity mapping, vertical.
-    /// Character codes map directly to CIDs (i.e. CID = character code).
     IdentityV,
 
-    // ── Adobe-Korea1 (Korean) ──
     /// `KSC-EUC-H` — Adobe-Korea1, KS X 1001:1992 EUC-KR encoding, horizontal.
     KscEucH,
     /// `KSC-EUC-V` — Adobe-Korea1, KS X 1001:1992 EUC-KR encoding, vertical.
@@ -154,7 +139,6 @@ pub enum CMapName<'a> {
     /// `KSCpc-EUC-H` — Adobe-Korea1, Mac KS X 1001:1992 EUC-KR encoding, horizontal.
     KscpcEucH,
 
-    // ── Adobe-CNS1 (Traditional Chinese) ── Unicode encodings ──
     /// `UniCNS-UCS2-H` — Adobe-CNS1, Unicode UCS-2 encoding, horizontal.
     UniCnsUcs2H,
     /// `UniCNS-UCS2-V` — Adobe-CNS1, Unicode UCS-2 encoding, vertical.
@@ -164,7 +148,6 @@ pub enum CMapName<'a> {
     /// `UniCNS-UTF16-V` — Adobe-CNS1, Unicode UTF-16 encoding, vertical.
     UniCnsUtf16V,
 
-    // ── Adobe-GB1 (Simplified Chinese) ── Unicode encodings ──
     /// `UniGB-UCS2-H` — Adobe-GB1, Unicode UCS-2 encoding, horizontal.
     UniGbUcs2H,
     /// `UniGB-UCS2-V` — Adobe-GB1, Unicode UCS-2 encoding, vertical.
@@ -174,7 +157,6 @@ pub enum CMapName<'a> {
     /// `UniGB-UTF16-V` — Adobe-GB1, Unicode UTF-16 encoding, vertical.
     UniGbUtf16V,
 
-    // ── Adobe-Japan1 (Japanese) ── Unicode encodings ──
     /// `UniJIS-UCS2-H` — Adobe-Japan1, Unicode UCS-2 encoding, horizontal.
     UniJisUcs2H,
     /// `UniJIS-UCS2-HW-H` — Adobe-Japan1, Unicode UCS-2 with half-width Roman, horizontal.
@@ -188,7 +170,6 @@ pub enum CMapName<'a> {
     /// `UniJIS-UTF16-V` — Adobe-Japan1, Unicode UTF-16 encoding, vertical.
     UniJisUtf16V,
 
-    // ── Adobe-Korea1 (Korean) ── Unicode encodings ──
     /// `UniKS-UCS2-H` — Adobe-Korea1, Unicode UCS-2 encoding, horizontal.
     UniKsUcs2H,
     /// `UniKS-UCS2-V` — Adobe-Korea1, Unicode UCS-2 encoding, vertical.
@@ -198,7 +179,6 @@ pub enum CMapName<'a> {
     /// `UniKS-UTF16-V` — Adobe-Korea1, Unicode UTF-16 encoding, vertical.
     UniKsUtf16V,
 
-    // ── Adobe-Japan1 (Japanese) ── JIS encoding ──
     /// `V` — Adobe-Japan1, JIS X 0208 row-cell encoding, vertical.
     V,
 
@@ -207,7 +187,7 @@ pub enum CMapName<'a> {
 }
 
 impl<'a> CMapName<'a> {
-    /// Create a `CMapType` from raw bytes.
+    /// Create a `CMapName` from raw bytes.
     pub fn from_bytes(name: &'a [u8]) -> Self {
         match name {
             b"83pv-RKSJ-H" => Self::N83pvRksjH,
@@ -279,7 +259,7 @@ impl<'a> CMapName<'a> {
         }
     }
 
-    /// Convert the `CMapType` back to its raw byte representation.
+    /// Return the raw bytes of this `CMapName`.
     pub fn to_bytes(&self) -> &[u8] {
         match self {
             Self::N83pvRksjH => b"83pv-RKSJ-H",
@@ -352,16 +332,13 @@ impl<'a> CMapName<'a> {
     }
 }
 
-/// Let's limit the number of nested `usecmap` references to 16.
 const MAX_NESTING_DEPTH: u32 = 16;
 
 /// A parsed cmap.
 #[derive(Debug, Clone)]
 pub struct CMap {
     metadata: Metadata,
-    // Note that we don't actually use this, because Acrobat _seems_ to ignore
-    // it, too.
-    _codespace_ranges: Vec<CodespaceRange>,
+    codespace_ranges: Vec<CodespaceRange>,
     cid_ranges: PartitionedRanges,
     notdef_ranges: PartitionedRanges,
     bf_entries: Vec<BfRange>,
@@ -369,10 +346,7 @@ pub struct CMap {
 }
 
 impl CMap {
-    /// Parse a cmap from raw bytes.
-    ///
-    /// The `get_cmap` callback is used to recursively resolve cmaps that
-    /// are referenced via `usecmap`.
+    /// Parse a cmap, resolving `usecmap` references via `get_cmap`.
     pub fn parse<'a>(
         data: &[u8],
         get_cmap: impl Fn(CMapName<'_>) -> Option<&'a [u8]> + Clone + 'a,
@@ -400,7 +374,11 @@ impl CMap {
                 name: Some(Vec::from(name)),
                 writing_mode: Some(writing_mode),
             },
-            _codespace_ranges: Vec::new(),
+            codespace_ranges: alloc::vec![CodespaceRange {
+                number_bytes: 2,
+                low: 0x0000,
+                high: 0xFFFF,
+            }],
             cid_ranges: {
                 let mut r = PartitionedRanges::new();
                 r.push(
@@ -426,14 +404,29 @@ impl CMap {
         &self.metadata
     }
 
-    /// Look up the CID code of a character code.
-    ///
-    /// Returns `None` if the code does not match any range for the given byte length.
-    pub fn lookup_cid_code(&self, code: u32, byte_len: u8) -> Option<Cid> {
-        // Note that, in theory, we are supposed to first check the code space range
-        // whether the entry exists in the first place. However, from my experiments
-        // Acrobat mostly seems to ignore this, so we do that as well.
+    /// Return the cmap referenced via `usecmap`, if any.
+    pub fn base(&self) -> Option<&Self> {
+        self.base.as_deref()
+    }
 
+    /// Return the codespace ranges declared by this cmap.
+    pub fn codespace_ranges(&self) -> &[CodespaceRange] {
+        &self.codespace_ranges
+    }
+
+    /// Return the CID ranges declared by this cmap for codes of the given byte length.
+    pub fn cid_ranges(&self, byte_len: u8) -> &[CidRange] {
+        self.cid_ranges.get(byte_len).unwrap_or_default()
+    }
+
+    /// Return the `.notdef` ranges declared by this cmap for codes of the given byte length.
+    pub fn notdef_ranges(&self, byte_len: u8) -> &[CidRange] {
+        self.notdef_ranges.get(byte_len).unwrap_or_default()
+    }
+
+    /// Look up the CID of a character code.
+    pub fn lookup_cid_code(&self, code: u32, byte_len: u8) -> Option<Cid> {
+        // Codespace ranges are deliberately not checked first, matching Acrobat.
         let cid_ranges = self.cid_ranges.get(byte_len)?;
         let notdef_ranges = self.notdef_ranges.get(byte_len)?;
 
@@ -441,29 +434,20 @@ impl CMap {
             let offset = code.checked_sub(entry.range.start)?;
             return entry.cid_start.checked_add(offset);
         } else if let Some(entry) = find_in_ranges(notdef_ranges, code) {
-            // For `.notdef` ranges, all codes map to the same `.notdef` CID, so
-            // no adding of the offset here.
             return Some(entry.cid_start);
         }
 
-        // See pdfjs_bug920426, it uses bf chars for encoding the characters
-        // of a text-showing operator, so try that as well. We don't want to
-        // recurse though, only check the bf chars of this level.
+        // Some files map text codes via bf chars (pdfjs_bug920426); only check this level.
         if let Some(BfString::Char(lookup)) = self.lookup_bf_string_inner(code, false) {
             return Some(lookup as u32);
         }
 
-        // If we still haven't found anything, check the base cmap.
         self.base
             .as_ref()
             .and_then(|b| b.lookup_cid_code(code, byte_len))
     }
 
-    /// Look up a bf string in the cmap. This is usually
-    /// used for mapping character codes to Unicode codepoints in a
-    /// `ToUnicode` cmap.
-    ///
-    /// Returns `None` if no mapping is available.
+    /// Look up the bf string of a character code.
     pub fn lookup_bf_string(&self, code: u32) -> Option<BfString> {
         self.lookup_bf_string_inner(code, true)
     }
@@ -522,7 +506,6 @@ fn find_in_ranges<T: HasRange>(entries: &[T], code: u32) -> Option<&T> {
     Some(&entries[idx])
 }
 
-/// A range with a start and end code.
 #[derive(Debug, Clone)]
 pub(crate) struct Range {
     pub(crate) start: u32,
@@ -534,6 +517,23 @@ pub(crate) struct Range {
 pub struct CidRange {
     pub(crate) range: Range,
     pub(crate) cid_start: Cid,
+}
+
+impl CidRange {
+    /// Return the first character code of the range.
+    pub fn start(&self) -> u32 {
+        self.range.start
+    }
+
+    /// Return the last character code of the range (inclusive).
+    pub fn end(&self) -> u32 {
+        self.range.end
+    }
+
+    /// Return the CID that the first character code maps to.
+    pub fn cid_start(&self) -> Cid {
+        self.cid_start
+    }
 }
 
 impl HasRange for CidRange {
@@ -589,11 +589,27 @@ impl HasRange for BfRange {
 
 /// A codespace range defining valid character code byte sequences.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(crate) struct CodespaceRange {
+pub struct CodespaceRange {
     pub(crate) number_bytes: u8,
     pub(crate) low: u32,
     pub(crate) high: u32,
+}
+
+impl CodespaceRange {
+    /// Return the number of bytes of the character codes in this range.
+    pub fn byte_len(&self) -> u8 {
+        self.number_bytes
+    }
+
+    /// Return the lower bound of the range.
+    pub fn low(&self) -> u32 {
+        self.low
+    }
+
+    /// Return the upper bound of the range.
+    pub fn high(&self) -> u32 {
+        self.high
+    }
 }
 
 /// A Unicode value decoded from a cmap.
@@ -617,7 +633,7 @@ pub struct Metadata {
 }
 
 /// The registry+ordering family of a CID character collection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CidFamily {
     /// Adobe-Japan1
     AdobeJapan1,
@@ -661,8 +677,7 @@ impl CidFamily {
         }
     }
 
-    /// Return the predefined UTF-16 `CMap` that maps Unicode code points to CIDs
-    /// for this family, if one exists.
+    /// Return the predefined UTF-16 cmap mapping Unicode to CIDs for this family.
     pub fn unicode_cmap(&self) -> Option<CMapName<'static>> {
         match self {
             Self::AdobeJapan1 => Some(CMapName::UniJisUtf16H),
@@ -673,7 +688,7 @@ impl CidFamily {
         }
     }
 
-    /// Return the `UCS2` cmap corresponding to the given character collection.
+    /// Return the `UCS2` cmap of this family.
     pub fn ucs2_cmap(&self) -> Option<CMapName<'static>> {
         match self {
             Self::AdobeJapan1 => Some(CMapName::AdobeJapan1Ucs2),
@@ -686,7 +701,7 @@ impl CidFamily {
 }
 
 /// A CID character collection identifying the character set and ordering.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CharacterCollection {
     /// The registry+ordering family.
     pub family: CidFamily,
@@ -707,10 +722,6 @@ pub enum WritingMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Note that those cmaps might not be completely valid according to the rules
-    // of cmap/Postscript, but since our parser is very lenient and doesn't run a real
-    // interpreter we can shorten them by a lot.
 
     const PREAMBLE: &[u8] = br#"/CIDSystemInfo 3 dict dup begin
   /Registry (Adobe) def
@@ -817,6 +828,41 @@ endcidchar
         assert_eq!(cmap.lookup_cid_code(0x03, 1), Some(1));
         assert_eq!(cmap.lookup_cid_code(0x04, 1), Some(2));
         assert_eq!(cmap.lookup_cid_code(0x20, 1), Some(50));
+    }
+
+    #[test]
+    fn empty_bfchar_destination_keeps_the_other_entries() {
+        let cmap = parse_with_preamble(
+            br#"
+2 beginbfchar
+<00> <0041>
+<01> <>
+endbfchar
+"#,
+        );
+
+        assert_eq!(cmap.lookup_bf_string(0x00), Some(BfString::Char('A')));
+        assert_eq!(cmap.lookup_bf_string(0x01), None);
+    }
+
+    #[test]
+    fn empty_bfrange_destination_keeps_the_other_entries() {
+        let cmap = parse_with_preamble(
+            br#"
+3 beginbfrange
+<02> <03> <>
+<04> <05> <0042>
+<06> <07> [<> <0044>]
+endbfrange
+"#,
+        );
+
+        assert_eq!(cmap.lookup_bf_string(0x02), None);
+        assert_eq!(cmap.lookup_bf_string(0x03), None);
+        assert_eq!(cmap.lookup_bf_string(0x04), Some(BfString::Char('B')));
+        assert_eq!(cmap.lookup_bf_string(0x05), Some(BfString::Char('C')));
+        assert_eq!(cmap.lookup_bf_string(0x06), None);
+        assert_eq!(cmap.lookup_bf_string(0x07), Some(BfString::Char('D')));
     }
 
     #[test]
@@ -1133,7 +1179,6 @@ endbfrange
 "#,
         );
 
-        // ff, fi, fl ligatures
         assert_eq!(
             cmap.lookup_bf_string(0x005F),
             Some(BfString::String(String::from("ff")))
@@ -1194,7 +1239,7 @@ endbfchar
 
     #[test]
     fn minimal_cmap_no_name_no_wmode() {
-        // Extracted from corpus PDF 0500013.
+        // Corpus PDF 0500013.
         let data = br#"
 /CIDInit /ProcSet findresource begin
 12 dict begin
@@ -1217,8 +1262,7 @@ endcmap
 
     #[test]
     fn registry_as_name() {
-        // Extracted from corpus PDF 0875241, uses names instead of strings for
-        // strings for metadata.
+        // Corpus PDF 0875241.
         let data = br#"
 /CIDSystemInfo
 << /Registry /ABCDEF+SimSun
@@ -1252,7 +1296,7 @@ endbfrange
 
     #[test]
     fn single_byte_bfrange_destination() {
-        // See for example corpus test case 0625248.
+        // Corpus PDF 0625248.
         let cmap = parse_with_preamble(
             br#"
 1 beginbfrange
@@ -1270,6 +1314,89 @@ endbfrange
             cmap.lookup_bf_string(0x7f),
             Some(BfString::Char('\u{007F}'))
         );
+    }
+
+    #[test]
+    fn raw_ranges() {
+        let base_data = br#"
+1 begincodespacerange
+<00> <80>
+endcodespacerange
+1 begincidrange
+<20> <7E> 1
+endcidrange
+"#;
+
+        let child_data = br#"
+/Base usecmap
+1 begincodespacerange
+<8140> <9FFC>
+endcodespacerange
+1 begincidrange
+<8140> <817E> 633
+endcidrange
+1 beginnotdefrange
+<8180> <81FC> 7
+endnotdefrange
+"#;
+
+        let cmap = CMap::parse(child_data, |name| {
+            (name.to_bytes() == b"Base").then_some(base_data.as_slice())
+        })
+        .unwrap();
+
+        let codespace = cmap.codespace_ranges();
+        assert_eq!(codespace.len(), 1);
+        assert_eq!(
+            (
+                codespace[0].byte_len(),
+                codespace[0].low(),
+                codespace[0].high()
+            ),
+            (2, 0x8140, 0x9FFC)
+        );
+
+        let cid = cmap.cid_ranges(2);
+        assert_eq!(cid.len(), 1);
+        assert_eq!(
+            (cid[0].start(), cid[0].end(), cid[0].cid_start()),
+            (0x8140, 0x817E, 633)
+        );
+        assert!(cmap.cid_ranges(1).is_empty());
+        assert!(cmap.cid_ranges(5).is_empty());
+
+        let notdef = cmap.notdef_ranges(2);
+        assert_eq!(notdef.len(), 1);
+        assert_eq!(
+            (notdef[0].start(), notdef[0].end(), notdef[0].cid_start()),
+            (0x8180, 0x81FC, 7)
+        );
+
+        let base = cmap.base().unwrap();
+        assert!(base.base().is_none());
+        assert_eq!(base.codespace_ranges()[0].byte_len(), 1);
+        let base_cid = base.cid_ranges(1);
+        assert_eq!(
+            (
+                base_cid[0].start(),
+                base_cid[0].end(),
+                base_cid[0].cid_start()
+            ),
+            (0x20, 0x7E, 1)
+        );
+
+        for identity in [CMap::identity_h(), CMap::identity_v()] {
+            let codespace = identity.codespace_ranges();
+            assert_eq!(codespace.len(), 1);
+            assert_eq!(
+                (
+                    codespace[0].byte_len(),
+                    codespace[0].low(),
+                    codespace[0].high()
+                ),
+                (2, 0x0000, 0xFFFF)
+            );
+        }
     }
 }
 
@@ -1325,7 +1452,6 @@ mod bcmap_tests {
                 supplement: 1,
             })
         );
-        // Inherited from base "H" via usecmap.
         assert_eq!(cmap.lookup_cid_code(0x2121, 2), Some(633));
     }
 
@@ -1435,8 +1561,6 @@ mod bcmap_tests {
         assert_eq!(cmap.lookup_cid_code(0x0041, 2), Some(0x41));
         assert_eq!(cmap.lookup_cid_code(0xFFFF, 2), Some(0xFFFF));
     }
-
-    // Note: Some tests AI-generated, haven't double-checked them.
 
     #[test]
     fn embedded_adobe_gb1_ucs2() {

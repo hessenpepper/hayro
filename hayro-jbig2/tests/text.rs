@@ -1,5 +1,3 @@
-//! Text regions (6.4): reference corners, transposition, offsets, refinement and combination operators.
-
 use crate::check;
 
 #[test]
@@ -70,6 +68,11 @@ fn refine_positive_offset() {
 #[test]
 fn refine_large_offsets() {
     check("text_refine_large_offsets", "honeycomb");
+}
+
+#[test]
+fn many_instances() {
+    check("text_many_instances", "honeycomb");
 }
 
 #[test]

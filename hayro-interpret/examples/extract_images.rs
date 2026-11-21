@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 fn main() {
     let data = std::fs::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hayro-tests/pdfs/custom/image_rgb8.pdf"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/pdfs/custom/image_rgb8.pdf"),
     )
     .unwrap();
 
@@ -58,7 +58,15 @@ impl Device<'_> for ImageExtractor {
 
     fn push_clip_path(&mut self, _: &ClipPath) {}
 
-    fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'_>>, _: BlendMode) {}
+    fn push_transparency_group(
+        &mut self,
+        _: f32,
+        _: Option<SoftMask<'_>>,
+        _: BlendMode,
+        _: bool,
+        _: bool,
+    ) {
+    }
 
     fn draw_glyph_run(&mut self, _: &GlyphRun<'_, '_>, _: DrawProps<'_>, _: &DrawMode) {}
 

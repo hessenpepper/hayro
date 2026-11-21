@@ -1,7 +1,6 @@
-//! Reading a JP2 file, defined in Annex I.
-
 use alloc::vec::Vec;
 
+use crate::cancel::Cancel;
 use crate::error::{FormatError, Result, bail};
 use crate::j2c::ComponentData;
 use crate::jp2::r#box::{FILE_TYPE, JP2_SIGNATURE};
@@ -29,11 +28,9 @@ pub(crate) struct ImageBoxes {
 
 /// A decoded JPEG2000 image.
 pub struct DecodedImage<'a> {
-    /// The raw decoded JPEG2000 codestream components.
     pub(crate) decoded_components: &'a mut Vec<ComponentData>,
-    /// The JP2 boxes of the image. In the case of a raw codestream, we
-    /// will synthesize the necessary boxes.
     pub(crate) boxes: ImageBoxes,
+    pub(crate) cancel: Cancel<'a>,
 }
 
 pub(crate) fn parse<'a>(data: &'a [u8], mut settings: DecodeSettings) -> Result<Image<'a>> {
@@ -53,7 +50,6 @@ pub(crate) fn parse<'a>(data: &'a [u8], mut settings: DecodeSettings) -> Result<
     let mut image_boxes: Option<ImageBoxes> = None;
     let mut parsed_codestream = None;
 
-    // Read boxes until we find the JP2 Header box
     while !reader.at_end() {
         let Some(current_box) = r#box::read(&mut reader, settings.strict) else {
             if settings.strict {
@@ -69,7 +65,6 @@ pub(crate) fn parse<'a>(data: &'a [u8], mut settings: DecodeSettings) -> Result<
 
                 let mut jp2h_reader = BitReader::new(current_box.data);
 
-                // Read child boxes within JP2 Header box
                 while !jp2h_reader.at_end() {
                     let child_box = r#box::read(&mut jp2h_reader, settings.strict)
                         .ok_or(FormatError::InvalidBox)?;
@@ -79,8 +74,6 @@ pub(crate) fn parse<'a>(data: &'a [u8], mut settings: DecodeSettings) -> Result<
                             if cdef::parse(&mut boxes, child_box.data).is_err() && settings.strict {
                                 bail!(FormatError::InvalidBox);
                             }
-                            // If not strict decoding, just assume default
-                            // configuration.
                         }
                         r#box::COLOUR_SPECIFICATION => {
                             colr::parse(&mut boxes, child_box.data)?;
@@ -90,20 +83,13 @@ pub(crate) fn parse<'a>(data: &'a [u8], mut settings: DecodeSettings) -> Result<
                                 bail!(FormatError::InvalidBox);
                             }
 
-                            // If we have a palettized image, decoding at a
-                            // lower resolution will corrupt it, so we can't do
-                            // it in this case.
+                            // Reduced-resolution decoding would corrupt palette indices.
                             settings.target_resolution = None;
                         }
                         r#box::COMPONENT_MAPPING => {
                             cmap::parse(&mut boxes, child_box.data)?;
                         }
-                        _ => {
-                            debug!(
-                                "ignoring header box {}",
-                                r#box::tag_to_string(child_box.box_type)
-                            );
-                        }
+                        _ => {}
                     }
                 }
 
@@ -122,9 +108,7 @@ pub(crate) fn parse<'a>(data: &'a [u8], mut settings: DecodeSettings) -> Result<
     if let Some(palette) = image_boxes.palette.as_ref()
         && image_boxes.component_mapping.is_none()
     {
-        // In theory, a cmap is required if we have pclr, but since there are
-        // some files that don't seem to do so, we assume
-        // that all channels are mapped via the palette in case not.
+        // Some files have a pclr box without cmap; map every channel through the palette.
         let mappings = (0..palette.columns.len())
             .map(|i| ComponentMappingEntry {
                 component_index: 0,

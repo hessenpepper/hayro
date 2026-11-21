@@ -1,18 +1,16 @@
-//! Generic region segment parsing and decoding (7.4.6, 6.2).
-
 use super::{
     AdaptiveTemplatePixel, RegionBitmap, RegionSegmentInfo, Template, parse_region_segment_info,
 };
-use crate::ScratchBuffers;
+use crate::DecodeState;
 use crate::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
 use crate::bitmap::{Bitmap, WORD_BITS, WORD_BYTES, WORD_SHIFT, Word};
-use crate::error::{ParseError, RegionError, Result, TemplateError, bail};
+use crate::cancel::{Cancel, row_mask};
+use crate::error::{Cancelled, ParseError, RegionError, Result, TemplateError, bail};
 use crate::reader::Reader;
 
-/// Generic region decoding procedure (6.2).
 pub(crate) fn decode(
     header: &GenericRegionHeader<'_>,
-    ctx: &mut ScratchBuffers,
+    ctx: &mut DecodeState<'_>,
 ) -> Result<RegionBitmap> {
     let mut bitmap = Bitmap::new_with(
         header.region_info.width,
@@ -20,6 +18,7 @@ pub(crate) fn decode(
         header.region_info.x_location,
         header.region_info.y_location,
         false,
+        &mut ctx.budget,
     )?;
 
     decode_into(header, &mut bitmap, ctx)?;
@@ -33,13 +32,12 @@ pub(crate) fn decode(
 pub(crate) fn decode_into(
     header: &GenericRegionHeader<'_>,
     bitmap: &mut Bitmap,
-    ctx: &mut ScratchBuffers,
+    ctx: &mut DecodeState<'_>,
 ) -> Result<()> {
     let data = header.data;
 
     if header.mmr {
-        // "6.2.6 Decoding using MMR coding"
-        let _ = decode_bitmap_mmr(bitmap, data, header.strict)?;
+        let _ = decode_bitmap_mmr(bitmap, data, header.strict, ctx.cancel)?;
     } else {
         let mut decoder = ArithmeticDecoder::new(data);
         ctx.contexts.clear();
@@ -48,7 +46,6 @@ pub(crate) fn decode_into(
             ArithmeticDecoderContext::default(),
         );
 
-        // "6.2.5 Decoding using a template and arithmetic coding"
         match &header.adaptive_template_pixels {
             GenericTemplatePixels::Regular(at_pixels) => decode_bitmap_arithmetic_coding(
                 bitmap,
@@ -57,6 +54,7 @@ pub(crate) fn decode_into(
                 header.template,
                 header.tpgdon,
                 at_pixels,
+                ctx.cancel,
             )?,
             GenericTemplatePixels::Extended(at_pixels) => decode_bitmap_extended_template(
                 bitmap,
@@ -64,14 +62,14 @@ pub(crate) fn decode_into(
                 &mut ctx.contexts,
                 header.tpgdon,
                 at_pixels,
-            ),
+                ctx.cancel,
+            )?,
         }
     }
 
     Ok(())
 }
 
-/// Parsed generic region segment header (7.4.6.1).
 #[derive(Debug, Clone)]
 pub(crate) struct GenericRegionHeader<'a> {
     pub(crate) region_info: RegionSegmentInfo,
@@ -83,16 +81,12 @@ pub(crate) struct GenericRegionHeader<'a> {
     pub(crate) strict: bool,
 }
 
-/// The adaptive template pixels of a generic region (7.4.6.3).
 #[derive(Debug, Clone)]
 pub(crate) enum GenericTemplatePixels {
-    /// GBTEMPLATE 0 to 3.
     Regular([AdaptiveTemplatePixel; 4]),
-    /// A1 to A12 of the extended template, if not all at their nominal locations.
     Extended([AdaptiveTemplatePixel; 12]),
 }
 
-/// Parse a generic region segment header (7.4.6.1).
 pub(crate) fn parse<'a>(
     reader: &mut Reader<'a>,
     had_unknown_length: bool,
@@ -104,7 +98,6 @@ pub(crate) fn parse<'a>(
 
     let template = Template::from_byte(flags >> 1);
     let tpgdon = flags & 0x08 != 0;
-    // The extended template only exists for GBTEMPLATE 0 (Table 2).
     let ext_template = flags & 0x10 != 0 && !mmr && template == Template::Template0;
     let adaptive_template_pixels = if ext_template {
         let mut pixels = [AdaptiveTemplatePixel::default(); 12];
@@ -112,8 +105,7 @@ pub(crate) fn parse<'a>(
             *pixel = parse_adaptive_template_pixel(reader)?;
         }
 
-        // At their nominal locations, the 12 AT pixels form the same contexts
-        // as template 0 with its default AT pixels.
+        // At their nominal locations, A1-A12 form the same contexts as template 0 with default AT pixels.
         let nominal = pixels
             .iter()
             .zip(EXTENDED_TEMPLATE_NOMINAL)
@@ -133,11 +125,6 @@ pub(crate) fn parse<'a>(
     };
     let mut data = reader.tail().ok_or(ParseError::UnexpectedEof)?;
 
-    // "As a special case, as noted in 7.2.7, an immediate generic region segment
-    // may have an unknown length. In this case, it also indicates the height of
-    // the generic region (i.e. the number of rows that have been decoded in this
-    // segment; it must be no greater than the region segment bitmap height value
-    // in the segment's region segment information field." (7.4.6.4)
     if had_unknown_length {
         // Length has already been validated during segment parsing.
         let (head, tail) = data.split_at(data.len() - 4);
@@ -162,7 +149,6 @@ pub(crate) fn parse<'a>(
     })
 }
 
-/// Parse adaptive template pixel positions (7.4.6.3).
 pub(crate) fn parse_adaptive_template_pixels(
     reader: &mut Reader<'_>,
     template: Template,
@@ -178,27 +164,20 @@ pub(crate) fn parse_adaptive_template_pixels(
     Ok(pixels)
 }
 
-/// Parse the location of one adaptive template pixel (7.4.6.3).
 fn parse_adaptive_template_pixel(reader: &mut Reader<'_>) -> Result<AdaptiveTemplatePixel> {
     let x = reader.read_byte().ok_or(ParseError::UnexpectedEof)? as i8;
     let y = reader.read_byte().ok_or(ParseError::UnexpectedEof)? as i8;
 
-    // Validate AT pixel location (6.2.5.4, Figure 7).
-    // AT pixels must reference already-decoded pixels:
-    // - y must be <= 0 (current row or above)
-    // - if y == 0, x must be < 0 (strictly to the left of current pixel)
     if y > 0 || (y == 0 && x >= 0) {
         bail!(TemplateError::InvalidAtPixel);
     }
 
-    Ok(AdaptiveTemplatePixel { x, y })
+    Ok(AdaptiveTemplatePixel { x: i16::from(x), y })
 }
 
-/// The default AT pixels of template 0 (Figure 3(a)).
-const TEMPLATE0_DEFAULT: [(i8, i8); 4] = [(3, -1), (-3, -1), (2, -2), (-2, -2)];
+const TEMPLATE0_DEFAULT: [(i16, i8); 4] = [(3, -1), (-3, -1), (2, -2), (-2, -2)];
 
-/// The nominal locations of A1 to A12 (Figure 3(b)).
-const EXTENDED_TEMPLATE_NOMINAL: [(i8, i8); 12] = [
+const EXTENDED_TEMPLATE_NOMINAL: [(i16, i8); 12] = [
     (-2, 0),
     (0, -2),
     (-2, -1),
@@ -213,8 +192,6 @@ const EXTENDED_TEMPLATE_NOMINAL: [(i8, i8); 12] = [
     (-3, -1),
 ];
 
-/// Whether the adaptive template pixels correspond to the default ones.
-/// See Table 5.
 fn has_default_at_pixels(template: Template, at_pixels: &[AdaptiveTemplatePixel; 4]) -> bool {
     match template {
         Template::Template0 => {
@@ -233,14 +210,16 @@ fn has_default_at_pixels(template: Template, at_pixels: &[AdaptiveTemplatePixel;
     }
 }
 
-/// Decode a bitmap using MMR coding (6.2.6).
-pub(crate) fn decode_bitmap_mmr(bitmap: &mut Bitmap, data: &[u8], strict: bool) -> Result<usize> {
-    // hayro-ccitt treats 0 rows as "decode until the end of the data".
+pub(crate) fn decode_bitmap_mmr(
+    bitmap: &mut Bitmap,
+    data: &[u8],
+    strict: bool,
+    cancel: Cancel<'_>,
+) -> Result<usize> {
     if bitmap.height == 0 {
         return Ok(0);
     }
 
-    /// A decoder sink that writes decoded rows into a `Bitmap`.
     struct BitmapDecoder<'a> {
         bitmap: &'a mut Bitmap,
         y: u32,
@@ -283,24 +262,23 @@ pub(crate) fn decode_bitmap_mmr(bitmap: &mut Bitmap, data: &[u8], strict: bool) 
     let height = bitmap.height;
     let mut decoder = BitmapDecoder { bitmap, y: 0 };
 
-    let mut settings = hayro_ccitt::DecodeSettings::new(width, height);
-    // "If the number of bytes contained in the encoded bitmap is known in
-    // advance, then it is permissible for the data stream not to contain
-    // an EOFB" (6.2.6). But it _can_ contain it, which is what this
-    // flag indicates.
-    settings.end_of_block = true;
-    settings.encoding = hayro_ccitt::EncodingMode::Group4;
-    settings.strict = strict;
+    let settings = hayro_ccitt::DecodeSettings {
+        columns: width,
+        rows: height,
+        // EOFB is optional when the data length is known.
+        end_of_block: true,
+        end_of_line: false,
+        rows_are_byte_aligned: false,
+        encoding: hayro_ccitt::EncodingMode::Group4,
+        strict,
+        cancel: cancel.ccitt(),
+    };
 
-    // "An invocation of the generic region decoding procedure with MMR equal to
-    // 1 shall consume an integral number of bytes, beginning and ending on a
-    // byte boundary. This may involve skipping over some bits in the last byte
-    // read." (6.2.6)
-    //
-    // hayro-ccitt already aligns to the byte boundary before returning, so
-    // nothing else to do here.
-    let mut context = hayro_ccitt::DecoderContext::new(settings);
-    let result = hayro_ccitt::decode(data, &mut decoder, &mut context);
+    let result = hayro_ccitt::decode(data, &mut decoder, &settings);
+
+    if result == Err(hayro_ccitt::DecodeError::Cancelled) {
+        bail!(Cancelled);
+    }
 
     if strict && (result.is_err() || decoder.y < height) {
         bail!(RegionError::InvalidMmrData);
@@ -313,9 +291,7 @@ pub(crate) fn decode_bitmap_mmr(bitmap: &mut Bitmap, data: &[u8], strict: bool) 
 fn fill_short<T: Copy>(slice: &mut [T], value: T) {
     let len = slice.len();
 
-    // Most spans are short, and for them a `memset` call costs more than the
-    // stores themselves. Overlapping fixed-size stores cover every length up
-    // to 32.
+    // Overlapping fixed-size stores beat a `memset` call for the short spans that dominate.
     match len {
         0 => {}
         1..4 => {
@@ -339,11 +315,10 @@ fn fill_short<T: Copy>(slice: &mut [T], value: T) {
     }
 }
 
-// I'm not sure why, but I was getting very weird codegen (with bad performance)
-// when attempting to do this via generics. Hence why we use a macro for that.
+// Generics produced much slower code here than this macro.
 macro_rules! decode_loop {
     ($bitmap:expr, $decoder:expr, $contexts:expr, $ctx_gatherer:expr,
-     $tpgdon:expr, $sltp_context:expr, $gather:expr) => {{
+     $tpgdon:expr, $sltp_context:expr, $gather:expr, $cancel:expr) => {{
         let bitmap: &mut Bitmap = $bitmap;
         let decoder: &mut ArithmeticDecoder<'_> = $decoder;
         let contexts: &mut [ArithmeticDecoderContext] = $contexts;
@@ -351,23 +326,25 @@ macro_rules! decode_loop {
         let width = bitmap.width;
         let height = bitmap.height;
 
-        // "1) Set: LTP = 0" (6.2.5.7)
         let mut ltp = false;
+        let cancel: Cancel<'_> = $cancel;
+        let check_mask = row_mask(width);
 
-        // "3) Decode each row as follows:" (6.2.5.7)
         for y in 0..height {
-            // "b) If TPGDON is 1, then decode a bit using the arithmetic entropy
-            // coder" (6.2.5.7)
+            if decoder.is_exhausted() {
+                bail!(ParseError::UnexpectedEof);
+            }
+
+            if y & check_mask == check_mask {
+                cancel.check()?;
+            }
+
             if $tpgdon {
                 let sltp = decoder.read_bit(&mut contexts[$sltp_context as usize]);
-                // "Let SLTP be the value of this bit. Set: LTP = LTP XOR SLTP" (6.2.5.7)
                 ltp = ltp != (sltp != 0);
             }
 
-            // "c) If LTP = 1 then set every pixel of the current row of GBREG equal
-            // to the corresponding pixel of the row immediately above." (6.2.5.7)
             if ltp {
-                // If y == 0, pixels remain the same.
                 if y > 0 {
                     let stride = bitmap.stride as usize;
                     let src = (y as usize - 1) * stride;
@@ -376,8 +353,6 @@ macro_rules! decode_loop {
                         .copy_within(src..src + stride, y as usize * stride);
                 }
             } else {
-                // "d) If LTP = 0 then, from left to right, decode each pixel of the
-                // current row of GBREG." (6.2.5.7)
                 ctx_gatherer.start_row(bitmap, y);
 
                 for x in 0..width {
@@ -421,16 +396,27 @@ macro_rules! decode_default_template_fast_loop {
         $contexts:expr,
         $tpgdon:expr,
         $sltp_context:expr,
-        $params:expr
+        $params:expr,
+        $cancel:expr
     ) => {{
         const BYTE_BITS: u32 = u8::BITS;
         let stride = $bitmap.stride as usize;
         let mut ltp = false;
+        let cancel: Cancel<'_> = $cancel;
+        let check_mask = row_mask($bitmap.width);
 
         let full_bytes = (($bitmap.width - 1) / BYTE_BITS) as usize;
         let last_byte_bits = (($bitmap.width - 1) & (BYTE_BITS - 1)) + 1;
 
         for y in 0..$bitmap.height {
+            if $decoder.is_exhausted() {
+                bail!(ParseError::UnexpectedEof);
+            }
+
+            if y & check_mask == check_mask {
+                cancel.check()?;
+            }
+
             if $tpgdon {
                 let sltp = $decoder.read_bit(&mut $contexts[$sltp_context as usize]);
                 ltp = ltp != (sltp != 0);
@@ -476,22 +462,27 @@ macro_rules! decode_default_template_fast_loop {
                     0
                 };
 
-                // In an all-white or all-black area, all pixels of the byte have the
-                // same context, so they can be decoded at once.
+                // A uniform context plus 8 MPS decodes without renormalization yields 8 pixels of that color.
                 let prev2_mask = ($params).prev2_next_mask * 0xff;
                 let prev1_mask = ($params).prev1_next_mask * 0xff;
                 let incoming_prev2 = val_prev2 & prev2_mask;
                 let incoming_prev1 = (val_prev1 >> ($params).prev1_shift) & prev1_mask;
-                let white = context == 0 && incoming_prev2 == 0 && incoming_prev1 == 0;
-                let black = context == ($params).full_context
+                let uniform_color = if context == 0 && incoming_prev2 == 0 && incoming_prev1 == 0 {
+                    Some(0)
+                } else if context == ($params).full_context
                     && incoming_prev2 == prev2_mask
-                    && incoming_prev1 == prev1_mask;
+                    && incoming_prev1 == prev1_mask
+                {
+                    Some(1)
+                } else {
+                    None
+                };
 
-                if white || black {
+                if let Some(color) = uniform_color {
                     let state = $contexts[context as usize];
 
-                    if state.mps() == black as u32 && $decoder.skip_mps(state, BYTE_BITS) {
-                        $bitmap.set_row_byte(y, byte_idx, if black { 0xff } else { 0 });
+                    if state.mps() == color && $decoder.decode_mps_run(state, BYTE_BITS) {
+                        $bitmap.set_row_byte(y, byte_idx, if color == 1 { 0xff } else { 0 });
                         continue;
                     }
                 }
@@ -528,7 +519,6 @@ macro_rules! decode_default_template_fast_loop {
     }};
 }
 
-/// Decode a bitmap using arithmetic coding (6.2.5).
 pub(crate) fn decode_bitmap_arithmetic_coding(
     bitmap: &mut Bitmap,
     decoder: &mut ArithmeticDecoder<'_>,
@@ -536,6 +526,7 @@ pub(crate) fn decode_bitmap_arithmetic_coding(
     template: Template,
     tpgdon: bool,
     adaptive_template_pixels: &[AdaptiveTemplatePixel; 4],
+    cancel: Cancel<'_>,
 ) -> Result<()> {
     if bitmap.width == 0 || bitmap.height == 0 {
         return Ok(());
@@ -552,7 +543,8 @@ pub(crate) fn decode_bitmap_arithmetic_coding(
                 contexts,
                 tpgdon,
                 sltp_context,
-                DEFAULT_TEMPLATE0_FAST_PARAMS
+                DEFAULT_TEMPLATE0_FAST_PARAMS,
+                cancel
             ),
             Template::Template1 => decode_default_template_fast_loop!(
                 bitmap,
@@ -560,7 +552,8 @@ pub(crate) fn decode_bitmap_arithmetic_coding(
                 contexts,
                 tpgdon,
                 sltp_context,
-                DEFAULT_TEMPLATE1_FAST_PARAMS
+                DEFAULT_TEMPLATE1_FAST_PARAMS,
+                cancel
             ),
             Template::Template2 => decode_default_template_fast_loop!(
                 bitmap,
@@ -568,7 +561,8 @@ pub(crate) fn decode_bitmap_arithmetic_coding(
                 contexts,
                 tpgdon,
                 sltp_context,
-                DEFAULT_TEMPLATE2_FAST_PARAMS
+                DEFAULT_TEMPLATE2_FAST_PARAMS,
+                cancel
             ),
             Template::Template3 => decode_default_template_fast_loop!(
                 bitmap,
@@ -576,7 +570,8 @@ pub(crate) fn decode_bitmap_arithmetic_coding(
                 contexts,
                 tpgdon,
                 sltp_context,
-                DEFAULT_TEMPLATE3_FAST_PARAMS
+                DEFAULT_TEMPLATE3_FAST_PARAMS,
+                cancel
             ),
         }
     } else {
@@ -588,7 +583,8 @@ pub(crate) fn decode_bitmap_arithmetic_coding(
                 &mut ctx_gatherer,
                 tpgdon,
                 sltp_context,
-                ContextGatherer::gather_template0_custom
+                ContextGatherer::gather_template0_custom,
+                cancel
             ),
             Template::Template1 => decode_loop!(
                 bitmap,
@@ -597,7 +593,8 @@ pub(crate) fn decode_bitmap_arithmetic_coding(
                 &mut ctx_gatherer,
                 tpgdon,
                 sltp_context,
-                ContextGatherer::gather_template1_custom
+                ContextGatherer::gather_template1_custom,
+                cancel
             ),
             Template::Template2 => decode_loop!(
                 bitmap,
@@ -606,7 +603,8 @@ pub(crate) fn decode_bitmap_arithmetic_coding(
                 &mut ctx_gatherer,
                 tpgdon,
                 sltp_context,
-                ContextGatherer::gather_template2_custom
+                ContextGatherer::gather_template2_custom,
+                cancel
             ),
             Template::Template3 => decode_loop!(
                 bitmap,
@@ -615,7 +613,8 @@ pub(crate) fn decode_bitmap_arithmetic_coding(
                 &mut ctx_gatherer,
                 tpgdon,
                 sltp_context,
-                ContextGatherer::gather_template3_custom
+                ContextGatherer::gather_template3_custom,
+                cancel
             ),
         }
     }
@@ -623,7 +622,6 @@ pub(crate) fn decode_bitmap_arithmetic_coding(
     Ok(())
 }
 
-/// The context used to decode SLTP (Figures 8 to 11).
 fn sltp_context(template: Template) -> u16 {
     match template {
         Template::Template0 => 0b1001101100100101,
@@ -633,18 +631,17 @@ fn sltp_context(template: Template) -> u16 {
     }
 }
 
-/// The context bits of A1 to A12: the bits template 0 uses for their nominal
-/// locations, so that the SLTP context stays the same.
+// Template 0's context bits for the nominal A1-A12, so the SLTP context matches.
 const EXTENDED_TEMPLATE_BITS: [u32; 12] = [1, 13, 9, 14, 12, 5, 2, 3, 11, 4, 15, 10];
 
-/// Decode a bitmap with the extended template (6.2.5).
 fn decode_bitmap_extended_template(
     bitmap: &mut Bitmap,
     decoder: &mut ArithmeticDecoder<'_>,
     contexts: &mut [ArithmeticDecoderContext],
     tpgdon: bool,
     at_pixels: &[AdaptiveTemplatePixel; 12],
-) {
+    cancel: Cancel<'_>,
+) -> Result<()> {
     let default_at_pixels = TEMPLATE0_DEFAULT.map(|(x, y)| AdaptiveTemplatePixel { x, y });
     let mut ctx_gatherer = ContextGatherer::new(Template::Template0, &default_at_pixels);
 
@@ -670,25 +667,23 @@ fn decode_bitmap_extended_template(
         &mut ctx_gatherer,
         tpgdon,
         sltp_context(Template::Template0),
-        gather
+        gather,
+        cancel
     );
+
+    Ok(())
 }
 
 pub(crate) struct ContextGatherer<'a> {
     template: Template,
     at_pixels: &'a [AdaptiveTemplatePixel; 4],
     use_default_at: bool,
-    /// Used in `maybe_reload_buffers` to determine how far to the right
-    /// we might access pixels.
     max_right: u32,
-    /// Current position.
     cur_y: u32,
     cur_x: u32,
-    /// Pre-fetched pixel buffers for rows y-2, y-1, y.
     buf_m2: Word,
     buf_m1: Word,
     buf_cur: Word,
-    /// The current context for all 3 rows.
     ctx: u16,
 }
 
@@ -751,9 +746,6 @@ impl<'a> ContextGatherer<'a> {
         };
         self.buf_cur = 0;
 
-        // Start initializing the contexts. Note that this won't load all initial
-        // pixels yet, those will only be loaded after our first call to `gather`.
-        // See 6.2.5.3 for the pixel positions.
         self.ctx = if self.use_default_at {
             self.init_context_default()
         } else {
@@ -869,10 +861,7 @@ impl<'a> ContextGatherer<'a> {
         let new_pixels = (Self::get_buf_pixel(self.buf_m2, bx + 1) << 12)
             | (Self::get_buf_pixel(self.buf_m1, bx + 2) << 5)
             | Self::get_buf_pixel(self.buf_cur, bx.wrapping_sub(1))
-            // Note that the cast from i32 to u32 is deliberate here: Negative positions
-            // should be resolved to 0, by casting negative i32 to u32 we end up with
-            // a very large positive number which is guaranteed to be OOB. The same
-            // applies to all other occurrences of this pattern (also in `generic_refinement.rs`).
+            // Negative coordinates wrap to huge u32 values, which `get_pixel` treats as out of bounds.
             | ((bitmap.get_pixel((xi + self.at_pixels[3].x as i32) as u32, (yi + self.at_pixels[3].y as i32) as u32) as u16) << 15)
             | ((bitmap.get_pixel((xi + self.at_pixels[2].x as i32) as u32, (yi + self.at_pixels[2].y as i32) as u32) as u16) << 11)
             | ((bitmap.get_pixel((xi + self.at_pixels[1].x as i32) as u32, (yi + self.at_pixels[1].y as i32) as u32) as u16) << 10)
@@ -981,8 +970,6 @@ impl<'a> ContextGatherer<'a> {
         self.ctx
     }
 
-    /// Note: The caller must ensure that `gather` has been called for this `x`
-    /// first.
     #[inline(always)]
     pub(crate) fn update_current_row(&mut self, x: u32, value: u8) {
         debug_assert!(x >= self.cur_x && x < self.cur_x + WORD_BITS);

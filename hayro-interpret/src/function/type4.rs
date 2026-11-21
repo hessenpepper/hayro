@@ -1,452 +1,291 @@
-use crate::function::{Clamper, Values};
-use hayro_syntax::content;
-use hayro_syntax::object::Number;
+use hayro_postscript::{Procedure, Scanner, Token};
 use hayro_syntax::object::Stream;
-use hayro_syntax::reader::Reader;
-use hayro_syntax::reader::{ReaderContext, ReaderExt};
-use smallvec::SmallVec;
-use std::array;
-use std::ops::Rem;
 
-/// A type 4 function (postscript function).
+const MAX_PROCEDURE_DEPTH: usize = 256;
+const MAX_STACK_DEPTH: usize = 100;
+
 #[derive(Debug)]
 pub(crate) struct Type4 {
-    program: Vec<PostScriptOp>,
-    clamper: Clamper,
+    code: Vec<PostScriptOp>,
 }
 
 impl Type4 {
-    /// Create a new type 4 function.
     pub(crate) fn new(stream: &Stream<'_>) -> Option<Self> {
-        let dict = stream.dict().clone();
-        let clamper = Clamper::new(&dict)?;
-
         Some(Self {
-            clamper,
-            program: parse_procedure(&stream.decoded().ok()?)?,
+            code: parse_procedure(&stream.decoded_data().ok()?)?,
         })
     }
 
-    /// Evaluate the function with the given input.
-    pub(crate) fn eval(&self, mut input: Values) -> Option<Values> {
-        self.clamper.clamp_input(&mut input);
+    pub(crate) fn evaluator(&self) -> impl FnMut(&[f32], &mut [f32]) -> Option<()> + '_ {
+        let mut stack = Stack::new();
 
-        let mut arg_stack = InterpreterStack::new();
+        move |input, output| {
+            let len = input.len();
+            stack.values.get_mut(..len)?.copy_from_slice(input);
+            stack.bools[..len].fill(false);
+            stack.len = len;
 
-        for input in input {
-            arg_stack.push(Argument::Float(input));
-        }
+            execute(&self.code, &mut stack)?;
 
-        eval_inner(&self.program, &mut arg_stack)?;
-
-        let mut out: SmallVec<_> = arg_stack.items().iter().map(|i| i.as_f32()).collect();
-
-        self.clamper.clamp_output(&mut out);
-
-        Some(out)
-    }
-}
-
-#[derive(Clone, Copy)]
-enum Argument {
-    Float(f32),
-    Bool(bool),
-}
-
-impl Default for Argument {
-    fn default() -> Self {
-        Self::Float(0.0)
-    }
-}
-
-impl Argument {
-    fn as_bool(&self) -> bool {
-        match self {
-            Self::Float(f) => *f != 0.0,
-            Self::Bool(b) => *b,
-        }
-    }
-
-    fn as_f32(&self) -> f32 {
-        match self {
-            Self::Float(f) => *f,
-            Self::Bool(b) => {
-                if *b {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
-        }
-    }
-}
-
-struct ArgumentsStack<T: Default, const C: usize> {
-    stack: [T; C],
-    len: usize,
-}
-
-impl<T: Default, const C: usize> ArgumentsStack<T, C> {
-    fn new() -> Self {
-        Self {
-            stack: array::from_fn(|_| T::default()),
-            len: 0,
-        }
-    }
-
-    #[inline]
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    #[inline]
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    #[inline]
-    fn push(&mut self, n: T) -> Option<()> {
-        if self.len == C {
-            error!("overflowed post script argument stack");
-
-            None
-        } else {
-            self.stack[self.len] = n;
-            self.len += 1;
+            let values = &stack.values[..stack.len];
+            output.copy_from_slice(values.get(values.len().checked_sub(output.len())?..)?);
 
             Some(())
         }
     }
+}
 
-    #[inline]
-    fn at(&self, index: usize) -> Option<&T> {
-        if index >= self.len {
-            None
-        } else {
-            Some(&self.stack[index])
+struct Stack {
+    values: [f32; MAX_STACK_DEPTH],
+    bools: [bool; MAX_STACK_DEPTH],
+    len: usize,
+}
+
+impl Stack {
+    fn new() -> Self {
+        Self {
+            values: [0.0; MAX_STACK_DEPTH],
+            bools: [false; MAX_STACK_DEPTH],
+            len: 0,
         }
-    }
-
-    #[inline]
-    fn last(&self) -> Option<&T> {
-        if self.is_empty() {
-            None
-        } else {
-            Some(&self.stack[self.len - 1])
-        }
-    }
-
-    #[inline]
-    fn pop(&mut self) -> Option<T> {
-        if self.is_empty() {
-            error!("underflowed post script argument stack");
-
-            None
-        } else {
-            self.len -= 1;
-            Some(std::mem::take(&mut self.stack[self.len]))
-        }
-    }
-
-    #[inline]
-    fn items(&self) -> &[T] {
-        &self.stack[..self.len]
-    }
-
-    #[inline]
-    fn items_mut(&mut self) -> &mut [T] {
-        &mut self.stack[..self.len]
     }
 }
 
-type InterpreterStack = ArgumentsStack<Argument, 64>;
-type ParseStack = ArgumentsStack<Vec<PostScriptOp>, 2>;
+fn execute(code: &[PostScriptOp], stack: &mut Stack) -> Option<()> {
+    use PostScriptOp as Op;
 
-fn eval_inner(procedure: &[PostScriptOp], arg_stack: &mut InterpreterStack) -> Option<()> {
-    macro_rules! zero {
-        ($eval:expr) => {
-            arg_stack.push($eval);
+    let Stack { values, bools, .. } = stack;
+    let mut len = stack.len;
+
+    macro_rules! pop {
+        () => {{
+            len = len.checked_sub(1)?;
+            values[len]
+        }};
+    }
+
+    macro_rules! push {
+        ($value:expr, $bool:expr) => {{
+            let value = $value;
+            *values.get_mut(len)? = value;
+            bools[len] = $bool;
+            len += 1;
+        }};
+    }
+
+    macro_rules! unary {
+        ($f:expr) => {{
+            let i = len.checked_sub(1)?;
+            values[i] = $f(values[i]);
+            bools[i] = false;
+        }};
+    }
+
+    macro_rules! binary {
+        ($f:expr, $bool:expr) => {{
+            let i = len.checked_sub(2)?;
+            values[i] = $f(values[i], values[i + 1])?;
+            bools[i] = $bool;
+            len -= 1;
+        }};
+    }
+
+    macro_rules! number {
+        ($f:expr) => {
+            binary!(|a: f32, b: f32| Some($f(a, b)), false)
         };
     }
 
-    macro_rules! one_f {
-        ($eval:expr) => {
-            let n1 = arg_stack.pop()?;
-            arg_stack.push(Argument::Float($eval(n1.as_f32())));
+    macro_rules! compare {
+        ($f:expr) => {
+            binary!(|a: f32, b: f32| Some(f32::from($f(a, b))), true)
         };
     }
 
-    macro_rules! two_f {
-        ($eval:expr) => {
-            let n2 = arg_stack.pop()?;
-            let n1 = arg_stack.pop()?;
-            arg_stack.push(Argument::Float($eval(n1.as_f32(), n2.as_f32())));
-        };
-    }
+    macro_rules! logical {
+        ($int:expr, $bool:expr) => {{
+            let i = len.checked_sub(2)?;
+            let any_bool = bools[i] || bools[i + 1];
+            let (a, b) = (values[i], values[i + 1]);
 
-    macro_rules! four {
-        ($eval_f:expr, $eval_b:expr) => {
-            let n2 = arg_stack.pop()?;
-            let n1 = arg_stack.pop()?;
-
-            let res = match (n1, n2) {
-                (Argument::Float(f1), Argument::Float(f2)) => Argument::Float($eval_f(f1, f2)),
-                (Argument::Float(_), Argument::Bool(f2)) => {
-                    Argument::Bool($eval_b(n1.as_bool(), f2))
-                }
-                (Argument::Bool(f1), Argument::Float(_)) => {
-                    Argument::Bool($eval_b(f1, n2.as_bool()))
-                }
-                (Argument::Bool(f1), Argument::Bool(f2)) => Argument::Bool($eval_b(f1, f2)),
+            values[i] = if any_bool {
+                f32::from($bool(a != 0.0, b != 0.0))
+            } else {
+                $int(a as i32, b as i32) as f32
             };
-
-            arg_stack.push(res);
-        };
+            bools[i] = any_bool;
+            len -= 1;
+        }};
     }
 
-    fn bf(cond: bool) -> f32 {
-        (cond as i32) as f32
-    }
+    let mut pc = 0;
 
-    for op in procedure {
+    while let Some(&op) = code.get(pc) {
+        pc += 1;
+
         match op {
-            PostScriptOp::Number(n) => arg_stack.push(Argument::Float(n.as_f64() as f32))?,
-            PostScriptOp::Abs => {
-                one_f!(|n: f32| n.abs());
-            }
-            PostScriptOp::Add => {
-                two_f!(|n1: f32, n2: f32| n1 + n2);
-            }
-            PostScriptOp::Atan => {
-                two_f!(|n1: f32, n2: f32| {
-                    let mut res = n1.atan2(n2).to_degrees() % 360.0;
-                    if res < 0.0 {
-                        res += 360.0;
-                    }
+            Op::Number(n) => push!(n, false),
+            Op::True => push!(1.0, true),
+            Op::False => push!(0.0, true),
+            Op::Abs => unary!(f32::abs),
+            Op::Ceiling => unary!(f32::ceil),
+            Op::Cos => unary!(|n: f32| n.to_radians().cos()),
+            Op::Cvi | Op::Truncate => unary!(f32::trunc),
+            Op::Cvr => unary!(|n| n),
+            Op::Floor => unary!(f32::floor),
+            Op::Ln => unary!(f32::ln),
+            Op::Log => unary!(f32::log10),
+            Op::Neg => unary!(|n: f32| -n),
+            Op::Round => unary!(f32::round),
+            Op::Sin => unary!(|n: f32| n.to_radians().sin()),
+            Op::Sqrt => unary!(f32::sqrt),
+            Op::Add => number!(|a, b| a + b),
+            Op::Atan => number!(|a: f32, b| {
+                let degrees = a.atan2(b).to_degrees();
+                if degrees < 0.0 {
+                    degrees + 360.0
+                } else {
+                    degrees
+                }
+            }),
+            Op::Div => number!(|a, b| a / b),
+            Op::Exp => number!(f32::powf),
+            Op::Idiv => binary!(
+                |a: f32, b: f32| Some((a as i32).checked_div(b as i32)? as f32),
+                false
+            ),
+            Op::Mod => number!(|a, b| a % b),
+            Op::Mul => number!(|a, b| a * b),
+            Op::Sub => number!(|a, b| a - b),
+            Op::Bitshift => number!(|a: f32, b: f32| {
+                let (num, shift) = (a as u32, b as i32);
 
-                    res
-                });
-            }
-            PostScriptOp::Ceiling => {
-                one_f!(|n: f32| n.ceil());
-            }
-            PostScriptOp::Cos => {
-                one_f!(|n: f32| n.to_radians().cos());
-            }
-            PostScriptOp::Cvi => {
-                one_f!(|n: f32| n.trunc());
-            }
-            PostScriptOp::Cvr => {
-                one_f!(|n: f32| n);
-            }
-            PostScriptOp::Div => {
-                two_f!(|n1: f32, n2: f32| n1 / n2);
-            }
-            PostScriptOp::Exp => {
-                two_f!(|n1: f32, n2: f32| n1.powf(n2));
-            }
-            PostScriptOp::Floor => {
-                one_f!(|n: f32| n.floor());
-            }
-            PostScriptOp::Idiv => {
-                two_f!(|n1: f32, n2: f32| {
-                    let n1 = n1 as i32;
-                    let n2 = n2 as i32;
-
-                    (n1 / n2) as f32
-                });
-            }
-            PostScriptOp::Ln => {
-                one_f!(|n: f32| n.ln());
-            }
-            PostScriptOp::Log => {
-                one_f!(|n: f32| n.log10());
-            }
-            PostScriptOp::Mod => {
-                two_f!(|n1: f32, n2: f32| n1.rem(n2));
-            }
-            PostScriptOp::Mul => {
-                two_f!(|n1: f32, n2: f32| n1 * n2);
-            }
-            PostScriptOp::Neg => {
-                one_f!(|n: f32| -n);
-            }
-            PostScriptOp::Round => {
-                one_f!(|n: f32| n.round());
-            }
-            PostScriptOp::Sin => {
-                one_f!(|n: f32| n.to_radians().sin());
-            }
-            PostScriptOp::Sqrt => {
-                one_f!(|n: f32| n.sqrt());
-            }
-            PostScriptOp::Sub => {
-                two_f!(|n1: f32, n2: f32| n1 - n2);
-            }
-            PostScriptOp::Truncate => {
-                one_f!(|n: f32| n.trunc());
-            }
-            PostScriptOp::And => {
-                two_f!(|n1: f32, n2: f32| (n1 as i32 & n2 as i32) as f32);
-            }
-            PostScriptOp::Bitshift => {
-                two_f!(|n1: f32, n2: f32| {
-                    let num = n1 as u32;
-                    let shift = n2 as i32;
-
-                    if shift >= 0 {
-                        (num << shift) as f32
-                    } else {
-                        (num >> -shift) as f32
-                    }
-                });
-            }
-            PostScriptOp::Eq => {
-                two_f!(|n1: f32, n2: f32| bf(n1 == n2));
-            }
-            PostScriptOp::False => {
-                zero!(Argument::Bool(false));
-            }
-            PostScriptOp::Ge => {
-                two_f!(|n1: f32, n2: f32| bf(n1 >= n2));
-            }
-            PostScriptOp::Gt => {
-                two_f!(|n1: f32, n2: f32| bf(n1 > n2));
-            }
-            PostScriptOp::Le => {
-                two_f!(|n1: f32, n2: f32| bf(n1 <= n2));
-            }
-            PostScriptOp::Lt => {
-                two_f!(|n1: f32, n2: f32| bf(n1 < n2));
-            }
-            PostScriptOp::Ne => {
-                two_f!(|n1: f32, n2: f32| bf(n1 != n2));
-            }
-            PostScriptOp::Not => {
-                let arg = arg_stack.pop()?;
-
-                let res = match arg {
-                    Argument::Float(f) => Argument::Float(!(f as i32) as f32),
-                    Argument::Bool(b) => Argument::Bool(!b),
+                if shift >= 0 {
+                    num.checked_shl(shift as u32).unwrap_or(0) as f32
+                } else {
+                    num.checked_shr(shift.unsigned_abs()).unwrap_or(0) as f32
+                }
+            }),
+            Op::Eq => compare!(|a, b| a == b),
+            Op::Ge => compare!(|a, b| a >= b),
+            Op::Gt => compare!(|a, b| a > b),
+            Op::Le => compare!(|a, b| a <= b),
+            Op::Lt => compare!(|a, b| a < b),
+            Op::Ne => compare!(|a, b| a != b),
+            Op::And => logical!(|a, b| a & b, |a, b| a && b),
+            Op::Or => logical!(|a, b| a | b, |a, b| a || b),
+            Op::Xor => logical!(|a, b| a ^ b, |a, b| a ^ b),
+            Op::Not => {
+                let i = len.checked_sub(1)?;
+                values[i] = if bools[i] {
+                    f32::from(values[i] == 0.0)
+                } else {
+                    !(values[i] as i32) as f32
                 };
+            }
+            Op::Copy => {
+                let n = pop!() as u32 as usize;
+                let start = len.checked_sub(n)?;
 
-                arg_stack.push(res);
-            }
-            PostScriptOp::Or => {
-                four!(
-                    |n1: f32, n2: f32| ((n1 as i32) | (n2 as i32)) as f32,
-                    |b1: bool, b2: bool| b1 || b2
-                );
-            }
-            PostScriptOp::True => {
-                zero!(Argument::Bool(true));
-            }
-            PostScriptOp::Xor => {
-                four!(
-                    |n1: f32, n2: f32| ((n1 as i32) ^ (n2 as i32)) as f32,
-                    |b1: bool, b2: bool| b1 ^ b2
-                );
-            }
-            PostScriptOp::If(p) => {
-                let cond = arg_stack.pop()?.as_bool();
-
-                if cond {
-                    eval_inner(p, arg_stack)?;
+                for i in start..start + n {
+                    push!(values[i], bools[i]);
                 }
             }
-            PostScriptOp::IfElse(p1, p2) => {
-                let cond = arg_stack.pop()?.as_bool();
+            Op::Dup => {
+                let i = len.checked_sub(1)?;
+                push!(values[i], bools[i]);
+            }
+            Op::Exch => {
+                let i = len.checked_sub(2)?;
+                values.swap(i, i + 1);
+                bools.swap(i, i + 1);
+            }
+            Op::Index => {
+                let n = pop!() as u32 as usize;
+                let i = len.checked_sub(n.checked_add(1)?)?;
+                push!(values[i], bools[i]);
+            }
+            Op::Pop => {
+                pop!();
+            }
+            Op::Roll => {
+                let j = pop!() as i32;
+                let n = pop!() as u32 as usize;
+                let start = len.checked_sub(n)?;
 
-                if cond {
-                    eval_inner(p1, arg_stack)?;
-                } else {
-                    eval_inner(p2, arg_stack)?;
+                if n > 0 {
+                    let shift = j.unsigned_abs() as usize % n;
+                    let (values, bools) = (&mut values[start..len], &mut bools[start..len]);
+
+                    if j >= 0 {
+                        values.rotate_right(shift);
+                        bools.rotate_right(shift);
+                    } else {
+                        values.rotate_left(shift);
+                        bools.rotate_left(shift);
+                    }
                 }
             }
-            PostScriptOp::Copy => {
-                let n = arg_stack.pop()?.as_f32() as u32 as usize;
-                let start = arg_stack.len().checked_sub(n)?;
-                for i in start..arg_stack.len() {
-                    arg_stack.push(*arg_stack.at(i)?);
+            Op::SkipUnless(n) => {
+                if pop!() == 0.0 {
+                    pc += n as usize;
                 }
             }
-            PostScriptOp::Dup => {
-                arg_stack.push(*arg_stack.last()?);
-            }
-            PostScriptOp::Exch => {
-                let n2 = arg_stack.pop()?;
-                let n1 = arg_stack.pop()?;
-
-                arg_stack.push(n2);
-                arg_stack.push(n1);
-            }
-            PostScriptOp::Index => {
-                let n = arg_stack.pop()?.as_f32() as u32 as usize;
-                let n = arg_stack.len().checked_sub(n + 1)?;
-
-                arg_stack.push(*arg_stack.at(n)?);
-            }
-            PostScriptOp::Pop => {
-                arg_stack.pop()?;
-            }
-            PostScriptOp::Roll => {
-                let j = arg_stack.pop()?.as_f32() as i32;
-                let n = arg_stack.pop()?.as_f32() as u32 as usize;
-                let trimmed_n = arg_stack.len().checked_sub(n)?;
-
-                let target = &mut arg_stack.items_mut()[trimmed_n..];
-
-                if target.is_empty() {
-                    continue;
-                }
-
-                if j >= 0 {
-                    let shift = j as usize % target.len();
-                    target.rotate_right(shift);
-                } else {
-                    let shift = (-j) as usize % target.len();
-                    target.rotate_left(shift);
-                }
-            }
+            Op::Skip(n) => pc += n as usize,
         }
     }
+
+    stack.len = len;
 
     Some(())
 }
 
 fn parse_procedure(data: &[u8]) -> Option<Vec<PostScriptOp>> {
-    let mut r = Reader::new(data);
-    parse_procedure_inner(&mut r)
+    let procedure = Scanner::new(data).parse_procedure().ok()?;
+    parse_procedure_inner(procedure, 0)
 }
 
-fn parse_procedure_inner(r: &mut Reader<'_>) -> Option<Vec<PostScriptOp>> {
-    let mut stack = ParseStack::new();
+fn parse_procedure_inner(procedure: Procedure<'_>, depth: usize) -> Option<Vec<PostScriptOp>> {
+    if depth >= MAX_PROCEDURE_DEPTH {
+        return None;
+    }
 
-    let mut ops = vec![];
-    r.skip_white_spaces_and_comments();
-    r.forward_tag(b"{")?;
+    let mut procedures: Vec<Vec<PostScriptOp>> = vec![];
+    let mut code = vec![];
+    let mut tokens = procedure.tokens();
 
-    loop {
-        r.skip_white_spaces_and_comments();
-
-        if r.peek_byte()? == b'}' {
-            r.forward_tag(b"}")?;
-
-            break;
-        } else if r.peek_byte()? == b'{' {
-            stack.push(parse_procedure_inner(r)?);
-        } else {
-            let op = PostScriptOp::from_reader(r, &mut stack)?;
-            ops.push(op);
+    while !tokens.at_end() {
+        match tokens.parse_token().ok()? {
+            Token::Number(n) => code.push(PostScriptOp::Number(n.as_f64() as f32)),
+            Token::Procedure(p) if procedures.len() < 2 => {
+                procedures.push(parse_procedure_inner(p, depth + 1)?);
+            }
+            Token::Name(n) if !n.is_literal() && !n.is_immediate() => match n.as_bytes() {
+                b"if" => {
+                    let then = procedures.pop()?;
+                    code.push(PostScriptOp::SkipUnless(then.len() as u32));
+                    code.extend(then);
+                }
+                b"ifelse" => {
+                    let otherwise = procedures.pop()?;
+                    let then = procedures.pop()?;
+                    code.push(PostScriptOp::SkipUnless(then.len() as u32 + 1));
+                    code.extend(then);
+                    code.push(PostScriptOp::Skip(otherwise.len() as u32));
+                    code.extend(otherwise);
+                }
+                name => code.push(PostScriptOp::from_operator(name)?),
+            },
+            _ => return None,
         }
     }
 
-    Some(ops)
+    Some(code)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum PostScriptOp {
-    Number(Number),
+    Number(f32),
     Abs,
     Add,
     Atan,
@@ -481,76 +320,60 @@ pub(super) enum PostScriptOp {
     Or,
     True,
     Xor,
-    If(Vec<Self>),
-    IfElse(Vec<Self>, Vec<Self>),
     Copy,
     Dup,
     Exch,
     Index,
     Pop,
     Roll,
+    SkipUnless(u32),
+    Skip(u32),
 }
 
 impl PostScriptOp {
-    fn from_reader(r: &mut Reader<'_>, stack: &mut ParseStack) -> Option<Self> {
-        let op = if let Some(n) = r.read::<Number>(&ReaderContext::dummy()) {
-            // TODO: Support radix numbers
-            Self::Number(n)
-        } else {
-            let op = r.read::<content::Operator<'_>>(&ReaderContext::dummy())?;
-            match op.as_ref() {
-                b"abs" => Self::Abs,
-                b"add" => Self::Add,
-                b"atan" => Self::Atan,
-                b"ceiling" => Self::Ceiling,
-                b"cos" => Self::Cos,
-                b"cvi" => Self::Cvi,
-                b"cvr" => Self::Cvr,
-                b"div" => Self::Div,
-                b"exp" => Self::Exp,
-                b"floor" => Self::Floor,
-                b"idiv" => Self::Idiv,
-                b"ln" => Self::Ln,
-                b"log" => Self::Log,
-                b"mod" => Self::Mod,
-                b"mul" => Self::Mul,
-                b"neg" => Self::Neg,
-                b"round" => Self::Round,
-                b"sin" => Self::Sin,
-                b"sqrt" => Self::Sqrt,
-                b"sub" => Self::Sub,
-                b"truncate" => Self::Truncate,
-                b"and" => Self::And,
-                b"bitshift" => Self::Bitshift,
-                b"eq" => Self::Eq,
-                b"false" => Self::False,
-                b"ge" => Self::Ge,
-                b"gt" => Self::Gt,
-                b"le" => Self::Le,
-                b"lt" => Self::Lt,
-                b"ne" => Self::Ne,
-                b"not" => Self::Not,
-                b"or" => Self::Or,
-                b"true" => Self::True,
-                b"xor" => Self::Xor,
-                b"if" => Self::If(stack.pop()?),
-                b"ifelse" => {
-                    let s = stack.pop()?;
-                    let f = stack.pop()?;
-                    Self::IfElse(f, s)
-                }
-                b"copy" => Self::Copy,
-                b"dup" => Self::Dup,
-                b"exch" => Self::Exch,
-                b"index" => Self::Index,
-                b"pop" => Self::Pop,
-                b"roll" => Self::Roll,
-                _ => {
-                    error!("encountered unknown postscript operator {op:?}");
-
-                    return None;
-                }
-            }
+    fn from_operator(op: &[u8]) -> Option<Self> {
+        let op = match op {
+            b"abs" => Self::Abs,
+            b"add" => Self::Add,
+            b"atan" => Self::Atan,
+            b"ceiling" => Self::Ceiling,
+            b"cos" => Self::Cos,
+            b"cvi" => Self::Cvi,
+            b"cvr" => Self::Cvr,
+            b"div" => Self::Div,
+            b"exp" => Self::Exp,
+            b"floor" => Self::Floor,
+            b"idiv" => Self::Idiv,
+            b"ln" => Self::Ln,
+            b"log" => Self::Log,
+            b"mod" => Self::Mod,
+            b"mul" => Self::Mul,
+            b"neg" => Self::Neg,
+            b"round" => Self::Round,
+            b"sin" => Self::Sin,
+            b"sqrt" => Self::Sqrt,
+            b"sub" => Self::Sub,
+            b"truncate" => Self::Truncate,
+            b"and" => Self::And,
+            b"bitshift" => Self::Bitshift,
+            b"eq" => Self::Eq,
+            b"false" => Self::False,
+            b"ge" => Self::Ge,
+            b"gt" => Self::Gt,
+            b"le" => Self::Le,
+            b"lt" => Self::Lt,
+            b"ne" => Self::Ne,
+            b"not" => Self::Not,
+            b"or" => Self::Or,
+            b"true" => Self::True,
+            b"xor" => Self::Xor,
+            b"copy" => Self::Copy,
+            b"dup" => Self::Dup,
+            b"exch" => Self::Exch,
+            b"index" => Self::Index,
+            b"pop" => Self::Pop,
+            b"roll" => Self::Roll,
+            _ => return None,
         };
 
         Some(op)
@@ -559,13 +382,32 @@ impl PostScriptOp {
 
 #[cfg(test)]
 mod tests {
-    use crate::function::type4::{PostScriptOp, Type4, parse_procedure};
-    use crate::function::{Clamper, Function, FunctionType, TupleVec, Values};
+    use crate::function::type4::{
+        MAX_PROCEDURE_DEPTH, PostScriptOp, Stack, Type4, execute, parse_procedure,
+    };
+    use crate::function::{Function, FunctionType, Interval, Repr};
     use std::f32::consts::LN_10;
     use std::sync::Arc;
 
-    use hayro_syntax::object::Number;
-    use smallvec::smallvec;
+    fn nested_program(depth: usize) -> Vec<u8> {
+        let mut program = "{ true ".repeat(depth - 1);
+        program.push_str("{ 1 }");
+        program.push_str(&" if }".repeat(depth - 1));
+
+        program.into_bytes()
+    }
+
+    #[test]
+    fn nested_procedures_up_to_bound() {
+        assert!(parse_procedure(&nested_program(MAX_PROCEDURE_DEPTH)).is_some());
+        assert!(parse_procedure(&nested_program(MAX_PROCEDURE_DEPTH + 1)).is_none());
+    }
+
+    #[test]
+    fn deep_procedure_nesting_fails() {
+        let program = format!("{}{}", "{".repeat(300_000), "}".repeat(300_000));
+        assert!(parse_procedure(program.as_bytes()).is_none());
+    }
 
     #[test]
     fn lex_1() {
@@ -577,7 +419,7 @@ mod tests {
             vec![
                 PostScriptOp::Copy,
                 PostScriptOp::Dup,
-                PostScriptOp::Number(Number::from_f32(2.0)),
+                PostScriptOp::Number(2.0),
                 PostScriptOp::Exch,
                 PostScriptOp::Roll,
             ]
@@ -592,30 +434,34 @@ mod tests {
         assert_eq!(
             parsed,
             vec![
-                PostScriptOp::If(vec![PostScriptOp::Dup, PostScriptOp::Exch]),
-                PostScriptOp::IfElse(
-                    vec![PostScriptOp::Number(Number::from_i32(0))],
-                    vec![PostScriptOp::Number(Number::from_i32(1))]
-                )
+                PostScriptOp::SkipUnless(2),
+                PostScriptOp::Dup,
+                PostScriptOp::Exch,
+                PostScriptOp::SkipUnless(2),
+                PostScriptOp::Number(0.0),
+                PostScriptOp::Skip(1),
+                PostScriptOp::Number(1.0),
             ]
         );
+    }
+
+    fn run(code: &[PostScriptOp]) -> Option<Vec<f32>> {
+        let mut stack = Stack::new();
+        execute(code, &mut stack)?;
+
+        Some(stack.values[..stack.len].to_vec())
     }
 
     fn op_impl(prog: &str, out: &[f32]) {
         let procedure = format!("{{{prog}}}");
         let procedure = parse_procedure(procedure.as_bytes()).unwrap();
 
-        let type4 = Type4 {
-            program: procedure,
-            clamper: Clamper {
-                domain: TupleVec::default(),
-                range: None,
-            },
-        };
+        assert_eq!(run(&procedure).unwrap().as_slice(), out);
+    }
 
-        let res = type4.eval(Values::new()).unwrap();
-
-        assert_eq!(res.as_slice(), out);
+    #[test]
+    fn radix_numbers() {
+        op_impl("16#FF 2#101", &[255.0, 5.0]);
     }
 
     #[test]
@@ -643,7 +489,6 @@ mod tests {
     #[test]
     fn op_cos() {
         op_impl("0 cos", &[1.0]);
-        // Should be zero, but floating point impreciseness.
         op_impl("90 cos", &[-4.371139e-8]);
     }
 
@@ -721,8 +566,7 @@ mod tests {
         op_impl("3.2 round", &[3.0]);
         op_impl("6.5 round", &[7.0]);
         op_impl("-4.8 round", &[-5.0]);
-        // TODO: This rounding doesn't match the PS spec.
-        // op_impl("-6.5 round", &[-6.0]);
+        // TODO: `-6.5 round` should yield -6 per the PostScript spec.
         op_impl("99 round", &[99.0]);
     }
 
@@ -820,6 +664,26 @@ mod tests {
     }
 
     #[test]
+    fn comparisons_are_booleans() {
+        op_impl("1 2 lt not", &[0.0]);
+        op_impl("2 1 lt not", &[1.0]);
+        op_impl("1 2 lt 3 4 lt and not", &[0.0]);
+    }
+
+    #[test]
+    fn op_idiv_by_zero() {
+        let program = parse_procedure(b"{ 1 0 idiv }").unwrap();
+
+        assert!(run(&program).is_none());
+    }
+
+    #[test]
+    fn op_bitshift_out_of_range() {
+        op_impl("1 40 bitshift", &[0.0]);
+        op_impl("1 -40 bitshift", &[0.0]);
+    }
+
+    #[test]
     fn op_or() {
         op_impl("true true or", &[1.0]);
         op_impl("true false or", &[1.0]);
@@ -894,16 +758,20 @@ mod tests {
     fn domain() {
         let procedure = parse_procedure(b"{  }").unwrap();
 
-        let type4 = Function(Arc::new(FunctionType::Type4(Type4 {
-            program: procedure,
-            clamper: Clamper {
-                domain: smallvec![(-5.0, 5.0), (-5.0, 5.0), (-5.0, 5.0)],
-                range: None,
-            },
-        })));
+        let type4 = Function(Arc::new(Repr {
+            domain: vec![
+                Interval {
+                    min: -5.0,
+                    max: 5.0
+                };
+                3
+            ],
+            range: None,
+            num_outputs: 3,
+            function_type: FunctionType::Type4(Type4 { code: procedure }),
+        }));
 
-        let input = smallvec![-10.0, -2.0, 6.0];
-        let res = type4.eval(input).unwrap();
+        let res = type4.eval_one(&[-10.0, -2.0, 6.0]).unwrap();
 
         assert_eq!(res.as_slice(), &[-5.0, -2.0, 5.0]);
     }

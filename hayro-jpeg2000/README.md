@@ -11,8 +11,7 @@ A memory-safe, pure-Rust JPEG 2000 decoder.
 inside the JP2 container format. The decoder supports the vast majority of features
 defined in the JPEG2000 core coding system (ISO/IEC 15444-1) as well as some color
 spaces from the extensions (ISO/IEC 15444-2). There are still some missing pieces
-for some "obscure" features(like for example support for progression order
-changes in tile-parts), but all features that actually commonly appear in real-life
+for some "obscure" features, but all features that actually commonly appear in real-life
 images should be supported (if not, please open an issue!).
 
 The decoder abstracts away most of the internal complexity of JPEG2000
@@ -36,7 +35,7 @@ println!(
 
 let mut ctx = DecoderContext::default();
 let decoded = image.decode(&mut ctx).unwrap();
-let bitmap = decoded.data_u8();
+let bitmap = decoded.data_u8().unwrap();
 ```
 
 If you want to see a more comprehensive example, please take a look

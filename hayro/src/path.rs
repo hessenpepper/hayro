@@ -1,26 +1,25 @@
 use crate::{Renderer, convert_fill_rule};
 use hayro_interpret::{DrawMode, DrawProps, FillRule, StrokeProps};
 use kurbo::{Affine, BezPath, Point, Rect, Shape};
+use std::f64::consts::SQRT_2;
+
+const MIN_DASH_PERIOD: f32 = 0.1;
 
 impl Renderer<'_> {
     pub(super) fn set_stroke_properties(&mut self, stroke_props: &StrokeProps, is_text: bool) {
         let threshold = if is_text { 0.25 } else { 1.0 };
 
-        // Best-effort attempt to ensure a line width of at least 1.0, as required by the PDF
-        // specification. If we are stroking text, we reduce the threshold as it will otherwise
-        // lead to very bold-looking text at low resolutions.
+        // Text gets a lower minimum width, since 1.0 makes it look bold at low resolutions.
         let min_factor = max_factor(self.ctx.transform());
         let mut line_width = stroke_props.line_width.max(0.01 / min_factor);
         let transformed_width = line_width * min_factor;
 
-        // Only enforce line width if not inside of pattern or type 3 glyph.
         if transformed_width < threshold && !self.inside_pattern && !self.in_type3_glyph {
             line_width /= transformed_width;
             line_width *= threshold;
         }
 
-        // At a device width of at most one pixel, round caps and joins are indistinguishable
-        // from square caps and bevel joins, which are much cheaper to construct.
+        // At most one pixel wide, round caps/joins look like square/bevel and are cheaper.
         let is_thin = transformed_width <= 1.0;
         let cap = match stroke_props.line_cap {
             kurbo::Cap::Round if is_thin => kurbo::Cap::Square,
@@ -31,13 +30,20 @@ impl Renderer<'_> {
             join => join,
         };
 
+        let dash_period: f32 = stroke_props.dash_array.iter().map(|n| n.abs()).sum();
+        let dash_pattern = if dash_period * min_factor >= MIN_DASH_PERIOD {
+            stroke_props.dash_array.iter().map(|n| *n as f64).collect()
+        } else {
+            kurbo::Dashes::new()
+        };
+
         let stroke = kurbo::Stroke {
             width: line_width as f64,
             join,
             miter_limit: stroke_props.miter_limit as f64,
             start_cap: cap,
             end_cap: cap,
-            dash_pattern: stroke_props.dash_array.iter().map(|n| *n as f64).collect(),
+            dash_pattern,
             dash_offset: stroke_props.dash_offset as f64,
         };
 
@@ -53,6 +59,13 @@ impl Renderer<'_> {
     ) {
         self.apply_draw_props(&props);
         self.set_stroke_properties(stroke_props, is_text);
+
+        let stroke = self.ctx.stroke();
+        let extent = stroke.width / 2.0 * stroke.miter_limit.max(SQRT_2);
+        let bbox = path.control_box().inflate(extent, extent);
+        if self.misses_target(props.transform.transform_rect_bbox(bbox)) {
+            return;
+        }
 
         let clip_path = self.set_paint(&props.paint, || path.bounding_box(), true);
         if let Some(clip_path) = clip_path.as_ref() {

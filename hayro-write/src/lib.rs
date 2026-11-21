@@ -8,9 +8,6 @@ well-documented.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-#[macro_use]
-mod log;
-
 pub mod incremental;
 mod primitive;
 
@@ -59,8 +56,6 @@ pub fn extract<'a>(
         ctx.root_refs.push(res.map(|_| root_ref));
     }
 
-    // Now we have shallowly extracted all pages, now go through all dependencies until there aren't
-    // any anymore.
     write_dependencies(pdf, &mut ctx);
 
     let mut global_chunk = Chunk::with_settings(chunk_settings);
@@ -76,8 +71,7 @@ pub fn extract<'a>(
     })
 }
 
-/// A type of extraction query, indicating as what kind of
-/// object you want to extract the page.
+/// The kind of object a page is extracted as.
 #[derive(Copy, Clone, Debug)]
 pub enum ExtractionQueryType {
     /// Extract the page as an `XObject`.
@@ -183,7 +177,6 @@ impl<'a> ExtractionContext<'a> {
 
 fn write_dependencies(pdf: &Pdf, ctx: &mut ExtractionContext<'_>) {
     while let Some(ref_) = ctx.to_visit_refs.pop() {
-        // Don't visit objects twice!
         if ctx.visited_objects.contains(&ref_) {
             continue;
         }
@@ -195,14 +188,11 @@ fn write_dependencies(pdf: &Pdf, ctx: &mut ExtractionContext<'_>) {
             ctx.chunks.push(chunk);
 
             ctx.visited_objects.insert(ref_);
-        } else {
-            warn!("failed to extract object with ref: {ref_:?}");
         }
     }
 }
 
-/// Extract the given pages from the PDF and resave them as a new PDF. This function shouldn't be
-/// used directly and only exists for test purposes.
+/// Extracts the given pages into a new PDF.
 #[doc(hidden)]
 pub fn extract_pages_to_pdf(hayro_pdf: &Pdf, page_indices: &[usize]) -> Vec<u8> {
     let mut pdf = pdf_writer::Pdf::new();
@@ -235,8 +225,7 @@ pub fn extract_pages_to_pdf(hayro_pdf: &Pdf, page_indices: &[usize]) -> Vec<u8> 
     pdf.finish()
 }
 
-/// Extract the given pages as XObjects from the PDF and resave them as a new PDF.
-/// This function shouldn't be used directly and only exists for test purposes.
+/// Extracts the given pages as XObjects into a new PDF.
 #[doc(hidden)]
 pub fn extract_pages_as_xobject_to_pdf(hayro_pdf: &Pdf, page_indices: &[usize]) -> Vec<u8> {
     let hayro_pages = hayro_pdf.pages();
@@ -312,8 +301,7 @@ fn write_page(
     ctx: &mut ExtractionContext<'_>,
 ) -> Result<(), ExtractionError> {
     let mut chunk = Chunk::with_settings(ctx.chunk_settings);
-    // Note: We can cache content stream references, but _not_ the page references themselves.
-    // Acrobat for some reason doesn't like duplicate page references in the page tree.
+    // Only content streams are shared: Acrobat rejects duplicate page references in the page tree.
     let stream_ref = if let Some(cached) = ctx.cached_content_streams.get(&page_idx) {
         *cached
     } else {
@@ -412,8 +400,7 @@ fn serialize_resources(
     ctx: &mut ExtractionContext<'_>,
     writer: &mut impl ResourcesExt,
 ) {
-    // Resource dictionary is always required (unless it can be inherited), so
-    // let's just be safe and always write it.
+    // Written even when empty: /Resources is required and nothing can be inherited.
     let mut output = writer.resources();
 
     macro_rules! write {

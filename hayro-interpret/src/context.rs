@@ -1,7 +1,7 @@
 use crate::cache::{Cache, CacheKey};
 use crate::color::{Color, ColorSpace};
 use crate::convert::convert_transform;
-use crate::font::{Font, PositionedGlyph, StandardFont};
+use crate::font::{FontCache, PositionedGlyph, StandardFont};
 use crate::interpret::stack::StateStack;
 use crate::interpret::state::{
     ClipType, CompositingState, PaintData, PaintState, State, TextState, TextStateFont,
@@ -18,21 +18,16 @@ use hayro_syntax::object::Name;
 use hayro_syntax::page::Resources;
 use hayro_syntax::xref::XRef;
 use kurbo::{Affine, BezPath, PathEl, Point, Rect, Shape};
-use rustc_hash::FxHashMap;
 use smallvec::smallvec;
-use std::cell::RefCell;
-use std::rc::Rc;
 
-/// Maximum nesting depth for interpreting `XObject`'s/patterns/streams.
 pub(crate) const MAX_NESTED_INTERPRETATION_DEPTH: u32 = 50;
 
-/// A cache used by the interpreter.
-///
-/// Ideally, such a cache should be constructed once per PDF and then reused across
-/// multiple interpreter invocations on the same document.
+/// A cache shared by interpreter invocations on the same document.
+// TODO: Cache keys are only unique within a document (streams, for example, are keyed by
+// their object identifier), so a cache shared across documents can mix up their objects.
 #[derive(Clone)]
 pub struct InterpreterCache<'a> {
-    pub(crate) font_cache: Rc<RefCell<FxHashMap<u128, Option<Font<'a>>>>>,
+    pub(crate) font_cache: FontCache<'a>,
     pub(crate) object_cache: Cache,
 }
 
@@ -46,7 +41,7 @@ impl<'a> InterpreterCache<'a> {
     /// Create a new interpreter cache.
     pub fn new() -> Self {
         Self {
-            font_cache: Rc::new(RefCell::new(FxHashMap::default())),
+            font_cache: FontCache::new(),
             object_cache: Cache::new(),
         }
     }
@@ -121,11 +116,10 @@ impl<'a> Context<'a> {
     }
 
     pub(crate) fn bbox(&self) -> Rect {
-        self.bbox.last().copied().unwrap_or_else(|| {
-            warn!("failed to get a bbox");
-
-            Rect::new(0.0, 0.0, 1.0, 1.0)
-        })
+        self.bbox
+            .last()
+            .copied()
+            .unwrap_or_else(|| Rect::new(0.0, 0.0, 1.0, 1.0))
     }
 
     fn push_bbox(&mut self, bbox: Rect) {
@@ -142,7 +136,6 @@ impl<'a> Context<'a> {
         if let Some(clip_rect) = path_as_rect(&clip_path) {
             let cur_bbox = self.bbox();
 
-            // If the clip path is a rect and completely covers the current bbox, don't emit it.
             if cur_bbox
                 .min_x()
                 .is_nearly_greater_or_equal(clip_rect.min_x())
@@ -234,6 +227,8 @@ impl<'a> Context<'a> {
 
         if data.color_space.is_pattern() || data.pattern.is_some() {
             if let Some(mut pattern) = data.pattern {
+                pattern.set_opacity(data.alpha);
+
                 if let Some(tf) = &data.transfer_function {
                     pattern.set_transfer_function(tf.clone());
                 }
@@ -242,7 +237,6 @@ impl<'a> Context<'a> {
 
                 Paint::Pattern(Box::new(pattern))
             } else {
-                // Pattern was likely invalid, use transparent paint.
                 Paint::Color(Color::new(ColorSpace::device_gray(), smallvec![0.0], 0.0))
             }
         } else {
@@ -332,7 +326,6 @@ impl<'a> Context<'a> {
         self.stack.compositing_mut()
     }
 
-    /// A copy of the current graphics state.
     pub(crate) fn snapshot(&self) -> State<'a> {
         self.stack.snapshot()
     }
@@ -368,8 +361,6 @@ impl<'a> Context<'a> {
 
     pub(crate) fn begin_nested_interpretation(&mut self) -> bool {
         if self.nesting_depth >= MAX_NESTED_INTERPRETATION_DEPTH {
-            warn!("interpreter nesting depth exceeded");
-
             return false;
         }
 
@@ -381,30 +372,27 @@ impl<'a> Context<'a> {
     pub(crate) fn end_nested_interpretation(&mut self) {
         self.nesting_depth = self.nesting_depth.saturating_sub(1);
     }
-    pub(crate) fn resolve_font(&mut self, font_dict: &Dict<'a>) -> Option<TextStateFont<'a>> {
-        let cache_key = font_dict.cache_key();
 
-        let resolved = {
-            let mut font_cache = self.interpreter_cache.font_cache.borrow_mut();
-            font_cache
-                .entry(cache_key)
-                .or_insert_with(|| {
-                    Font::new(
-                        font_dict,
-                        &self.settings.font_resolver,
-                        &self.settings.cmap_resolver,
-                    )
-                })
-                .clone()
-        };
+    pub(crate) fn fallback_font(&self) -> Option<TextStateFont<'a>> {
+        self.interpreter_cache
+            .font_cache
+            .standard_font(StandardFont::Helvetica, &self.settings.font_resolver)
+            .map(TextStateFont::Fallback)
+    }
+
+    pub(crate) fn resolve_font(&mut self, font_dict: &Dict<'a>) -> Option<TextStateFont<'a>> {
+        let resolved = self.interpreter_cache.font_cache.font(
+            font_dict,
+            &self.settings.font_resolver,
+            &self.settings.cmap_resolver,
+        );
 
         if let Some(resolved) = resolved {
             Some(TextStateFont::Font(resolved))
         } else {
             (self.settings.warning_sink)(InterpreterWarning::UnsupportedFont);
 
-            Font::new_standard(StandardFont::Helvetica, &self.settings.font_resolver)
-                .map(TextStateFont::Fallback)
+            self.fallback_font()
         }
     }
 }

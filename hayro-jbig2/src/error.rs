@@ -1,8 +1,6 @@
-//! Error types for JBIG2 decoding.
-
 use core::fmt;
 
-/// The main error type for JBIG2 decoding operations.
+/// An error that occurred while decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
     /// Errors related to reading/parsing data.
@@ -21,9 +19,17 @@ pub enum DecodeError {
     Symbol(SymbolError),
     /// Arithmetic overflow in calculations.
     Overflow(OverflowError),
+    /// Decoding would need more memory than the limit in the decode settings.
+    MemoryLimitExceeded,
     /// Feature not yet implemented.
     Unsupported,
+    /// Decoding was cancelled.
+    Cancelled,
 }
+
+/// The error returned when decoding was cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cancelled;
 
 /// Errors related to reading/parsing data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +87,7 @@ pub enum HuffmanError {
     MissingTables,
     /// Unexpected out-of-band value.
     UnexpectedOob,
-    /// Huffman tree has conflicting codes (one code is a prefix of another).
+    /// Huffman table has conflicting codes.
     ConflictingCodes,
 }
 
@@ -92,7 +98,7 @@ pub enum RegionError {
     InvalidCombinationOperator,
     /// Region with invalid dimension.
     InvalidDimension,
-    /// MMR (Modified Modified Read) decoding failed.
+    /// MMR decoding failed.
     InvalidMmrData,
     /// Gray-scale value exceeds pattern count.
     GrayScaleOutOfRange,
@@ -139,7 +145,7 @@ pub enum OverflowError {
     ReferenceOffset,
     /// Index computation overflowed.
     Index,
-    /// A symbol dictionary has too many symbols.
+    /// A symbol dictionary or region has too many symbols.
     SymbolCount,
 }
 
@@ -154,8 +160,16 @@ impl fmt::Display for DecodeError {
             Self::Template(e) => write!(f, "{e}"),
             Self::Symbol(e) => write!(f, "{e}"),
             Self::Overflow(e) => write!(f, "{e}"),
+            Self::MemoryLimitExceeded => write!(f, "memory limit exceeded"),
             Self::Unsupported => write!(f, "unsupported feature"),
+            Self::Cancelled => write!(f, "{Cancelled}"),
         }
+    }
+}
+
+impl fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "decoding was cancelled")
     }
 }
 
@@ -167,7 +181,7 @@ impl fmt::Display for OverflowError {
             Self::ReferenceOffset => write!(f, "overflow in reference offset computation"),
             Self::Index => write!(f, "overflow in index computation"),
             Self::GridDimension => write!(f, "overflow in grid dimension computation"),
-            Self::SymbolCount => write!(f, "a symbol dictionary has too many symbols"),
+            Self::SymbolCount => write!(f, "too many symbols"),
         }
     }
 }
@@ -255,6 +269,7 @@ impl fmt::Display for SymbolError {
 }
 
 impl core::error::Error for DecodeError {}
+impl core::error::Error for Cancelled {}
 impl core::error::Error for ParseError {}
 impl core::error::Error for FormatError {}
 impl core::error::Error for SegmentError {}
@@ -263,6 +278,12 @@ impl core::error::Error for RegionError {}
 impl core::error::Error for TemplateError {}
 impl core::error::Error for SymbolError {}
 impl core::error::Error for OverflowError {}
+
+impl From<Cancelled> for DecodeError {
+    fn from(_: Cancelled) -> Self {
+        Self::Cancelled
+    }
+}
 
 impl From<ParseError> for DecodeError {
     fn from(e: ParseError) -> Self {

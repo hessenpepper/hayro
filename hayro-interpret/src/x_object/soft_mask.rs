@@ -19,7 +19,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::rc::Rc;
 
-/// Type type of mask.
+/// The type of a soft mask.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaskType {
     /// A luminosity mask.
@@ -30,6 +30,7 @@ pub enum MaskType {
 
 struct Repr<'a> {
     dict_key: u128,
+    parent_resources_key: Option<u128>,
     group: FormXObject<'a>,
     mask_type: MaskType,
     parent_resources: Resources<'a>,
@@ -46,6 +47,7 @@ struct Repr<'a> {
 impl Hash for Repr<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.dict_key.hash(state);
+        self.parent_resources_key.hash(state);
         self.root_transform.cache_key().hash(state);
         self.bbox.cache_key().hash(state);
     }
@@ -108,9 +110,14 @@ impl<'a> SoftMask<'a> {
             _ => return None,
         };
         let nesting_depth = context.nesting_depth() + 1;
+        let parent_resources_key = group
+            .resources
+            .is_none()
+            .then(|| parent_resources.cache_key());
 
         Some(Self(Rc::new(Repr {
             dict_key: dict.cache_key(),
+            parent_resources_key,
             group,
             mask_type,
             root_transform: context.ctm(),

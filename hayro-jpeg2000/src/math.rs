@@ -158,6 +158,94 @@ mod inner {
             self.inner = self.inner / rhs;
         }
     }
+
+    #[inline(always)]
+    pub(crate) fn round_and_interleave<S: Simd, const N: usize>(
+        simd: S,
+        channels: [&[f32; 16]; N],
+        scale: f32,
+        out: &mut [u8],
+    ) {
+        // TODO: This can be optimized on ARM by specializing it.
+        match N {
+            1 => to_u8(simd, channels[0], scale).store_slice(out),
+            2 => {
+                let (low, high) = simd.interleave_u8x16(
+                    to_u8(simd, channels[0], scale),
+                    to_u8(simd, channels[1], scale),
+                );
+                let (out_low, out_high) = out.split_at_mut(16);
+                low.store_slice(out_low);
+                high.store_slice(out_high);
+            }
+            3 => {
+                let (c0, c1, c2) = (
+                    to_u8(simd, channels[0], scale),
+                    to_u8(simd, channels[1], scale),
+                    to_u8(simd, channels[2], scale),
+                );
+                for (out, [i0, i1, i2]) in out.as_chunks_mut::<16>().0.iter_mut().zip(THREE_WAY) {
+                    let interleaved = c0.swizzle_dyn_precise(i0)
+                        | c1.swizzle_dyn_precise(i1)
+                        | c2.swizzle_dyn_precise(i2);
+                    interleaved.store_slice(out);
+                }
+            }
+            4 => {
+                let channels = [
+                    to_u8(simd, channels[0], scale),
+                    to_u8(simd, channels[1], scale),
+                    to_u8(simd, channels[2], scale),
+                    to_u8(simd, channels[3], scale),
+                ];
+                simd.store_four_interleaved_u8x16(channels, out.try_into().unwrap());
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[inline(always)]
+    fn to_u8<S: Simd>(simd: S, values: &[f32; 16], scale: f32) -> fearless_simd::u8x16<S> {
+        let scale = fearless_simd::f32x8::splat(simd, scale);
+        let half = fearless_simd::f32x8::splat(simd, 0.5);
+        let convert = |i: usize| {
+            let v = fearless_simd::f32x8::from_slice(simd, &values[i..i + 8]) * scale + half;
+
+            // On NEON, the unsigned conversion and the narrowing saturate by themselves,
+            // which saves the explicit clamping.
+            #[cfg(target_arch = "aarch64")]
+            {
+                let (a, b) = simd.split_u32x8(simd.cvt_u32_precise_f32x8(v));
+                simd.saturating_narrow_u32x4(a, b)
+            }
+
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                use fearless_simd::Bytes;
+
+                let zero = fearless_simd::f32x8::splat(simd, 0.0);
+                let max = fearless_simd::f32x8::splat(simd, 255.0);
+                let (a, b) = simd
+                    .split_i32x8(simd.cvt_i32_f32x8(simd.min_f32x8(simd.max_f32x8(v, zero), max)));
+                simd.relaxed_narrow_i32x4(a, b).bitcast()
+            }
+        };
+        // A relaxed narrow here makes LLVM fuse both steps into a 32-to-8-bit truncation,
+        // which it scalarizes on wasm.
+        simd.saturating_narrow_u16x8(convert(0), convert(8))
+    }
+
+    const THREE_WAY: [[[u8; 16]; 3]; 3] = three_way_indices();
+
+    const fn three_way_indices() -> [[[u8; 16]; 3]; 3] {
+        let mut indices = [[[0x80; 16]; 3]; 3];
+        let mut i = 0;
+        while i < 48 {
+            indices[i / 16][i % 3][i % 16] = (i / 3) as u8;
+            i += 1;
+        }
+        indices
+    }
 }
 
 #[cfg(not(feature = "simd"))]
@@ -380,6 +468,20 @@ mod inner {
         }
     }
 
+    #[inline(always)]
+    pub(crate) fn round_and_interleave<S: Simd, const N: usize>(
+        _simd: S,
+        channels: [&[f32; 16]; N],
+        scale: f32,
+        out: &mut [u8],
+    ) {
+        for (i, pixel) in out.as_chunks_mut::<N>().0.iter_mut().enumerate() {
+            for (value, channel) in pixel.iter_mut().zip(channels) {
+                *value = super::round_to_u8(channel[i] * scale);
+            }
+        }
+    }
+
     /// Scalar fallback for SIMD dispatch.
     #[macro_export]
     macro_rules! simd_dispatch {
@@ -392,9 +494,6 @@ mod inner {
 
     pub(crate) use simd_dispatch as dispatch;
 }
-
-// Note that these polyfills can be very imprecise, but hopefully good enough
-// for the vast majority of cases.
 
 #[inline(always)]
 pub(crate) fn mul_add(a: f32, b: f32, c: f32) -> f32 {
@@ -482,9 +581,6 @@ pub(crate) fn max_f32(a: f32, b: f32) -> f32 {
 
 pub(crate) use inner::*;
 
-/// A wrapper around `Vec<f32>` that pads the vector to a multiple of `N` elements.
-/// This allows SIMD operations to safely process the data without bounds checking
-/// at the end of the buffer.
 #[derive(Debug, Clone)]
 pub(crate) struct SimdBuffer<const N: usize> {
     data: Vec<f32>,
@@ -492,7 +588,6 @@ pub(crate) struct SimdBuffer<const N: usize> {
 }
 
 impl<const N: usize> SimdBuffer<N> {
-    /// Create a new `SimdBuffer` from a `Vec<f32>`, padding it to a multiple of `N`.
     pub(crate) fn new(mut data: Vec<f32>) -> Self {
         let original_len = data.len();
         let padded_len = Self::padded_len(original_len);
@@ -502,19 +597,16 @@ impl<const N: usize> SimdBuffer<N> {
         Self { data, original_len }
     }
 
-    /// Create a new `SimdBuffer` filled with zeros.
     pub(crate) fn zeros(original_len: usize) -> Self {
         let padded_len = Self::padded_len(original_len);
         let data = vec![0.0; padded_len];
         Self { data, original_len }
     }
 
-    /// Returns only the original (non-padded) data as an immutable slice.
     pub(crate) fn truncated(&self) -> &[f32] {
         &self.data[..self.original_len]
     }
 
-    /// Returns the length padded to a multiple of `N`
     fn padded_len(original_len: usize) -> usize {
         let remainder = original_len % N;
         let padding = N - remainder;

@@ -36,29 +36,7 @@ impl ImageDecoder for Page<'_> {
 }
 
 fn decode_into_buf(page: &Page<'_>, buf: &mut [u8]) -> ImageResult<()> {
-    struct LumaDecoder<'a> {
-        buf: &'a mut [u8],
-        pos: usize,
-    }
-
-    impl crate::Decoder for LumaDecoder<'_> {
-        fn push_pixel(&mut self, black: bool) {
-            self.buf[self.pos] = if black { 0 } else { 255 };
-            self.pos += 1;
-        }
-
-        fn push_pixel_chunk(&mut self, black: bool, chunk_count: u32) {
-            let luma = if black { 0 } else { 255 };
-            let count = chunk_count as usize * 8;
-            self.buf[self.pos..self.pos + count].fill(luma);
-            self.pos += count;
-        }
-
-        fn next_line(&mut self) {}
-    }
-
-    let mut decoder = LumaDecoder { buf, pos: 0 };
-    page.decode(&mut decoder)?;
+    page.decode()?.store_u8_into(buf)?;
 
     Ok(())
 }
@@ -133,12 +111,15 @@ impl From<crate::DecodeError> for ImageError {
     }
 }
 
+impl From<crate::Cancelled> for ImageError {
+    fn from(value: crate::Cancelled) -> Self {
+        crate::DecodeError::from(value).into()
+    }
+}
+
 const JBIG2_MAGIC: &[u8] = &[0x97, 0x4A, 0x42, 0x32, 0x0D, 0x0A, 0x1A, 0x0A];
 
-/// Registers the decoder with the `image` crate so that non-format-specific calls such as
-/// `ImageReader::open("image.jbig2")?.decode()?;` work with JBIG2 files.
-///
-/// Returns `true` on success, or `false` if the hook for JBIG2 is already registered.
+/// Register the JBIG2 decoding hook with `image`; returns `false` if it is already registered.
 pub fn register_decoding_hook() -> bool {
     if decoding_hook_registered(OsStr::new("jbig2")) {
         return false;

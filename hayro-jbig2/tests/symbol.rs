@@ -1,5 +1,3 @@
-//! Symbol dictionaries (6.5): refinement/aggregate coding, context reuse and segment numbering.
-
 use crate::check;
 
 #[test]
@@ -108,7 +106,6 @@ fn global() {
 }
 
 #[test]
-#[ignore = "hayro limits symbol dictionaries to 65535 symbols"]
 fn many_symbols() {
     check("symbol_many_symbols", "honeycomb");
 }

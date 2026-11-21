@@ -1,74 +1,62 @@
-//! Bitmap representation for JBIG2 decoding.
-//!
-//! "The variable whose value is the result of this decoding procedure is shown
-//! in Table 3." (6.2.3)
-//!
-//! "GBREG - The decoded region bitmap." (Table 3)
-
+use crate::cancel::{Cancel, copy_work, row_mask};
 use crate::decode::CombinationOperator;
 use crate::error::{OverflowError, Result, bail};
+use crate::memory::MemoryBudget;
 use alloc::vec;
 use alloc::vec::Vec;
 
-// To guard better against malicious files, we limit bitmap dimensions
-// to `u16::MAX`, which should be more than enough.
-pub(crate) const MAX_DIMENSION: u32 = u16::MAX as u32;
+// Keeps pixel coordinates plus offsets within `i32`.
+pub(crate) const MAX_DIMENSION: u32 = 1 << 22;
+const MAX_AREA: u64 = (u16::MAX as u64).pow(2);
 
-/// The underlying word type for packed pixel storage.
-/// Change this to `u32` to switch back to 32-bit words.
 pub(crate) type Word = u32;
 
 pub(crate) const WORD_BITS: u32 = Word::BITS;
 pub(crate) const WORD_BYTES: u32 = WORD_BITS / u8::BITS;
 pub(crate) const WORD_SHIFT: u32 = WORD_BITS - 1;
 
-/// A decoded bitmap with position information.
-///
-/// "Pixels decoded by the MMR decoder having the value 'black' shall be treated
-/// as having the value 1. Pixels decoded by the MMR decoder having the value
-/// 'white' shall be treated as having the value 0." (6.2.6)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct Bitmap {
-    /// Width in pixels.
     pub(crate) width: u32,
-    /// Height in pixels.
     pub(crate) height: u32,
-    /// Number of words per row.
     pub(crate) stride: u32,
-    /// Packed pixel data, one bit per pixel, row-major order.
-    /// Each row is padded to a word boundary.
     pub(crate) data: Vec<Word>,
-    /// "This four-byte field gives the horizontal offset in pixels of the bitmap
-    /// encoded in this segment relative to the page bitmap." (7.4.1.3)
     pub(crate) x_location: u32,
-    /// "This four-byte field gives the vertical offset in pixels of the bitmap
-    /// encoded in this segment relative to the page bitmap." (7.4.1.4)
     pub(crate) y_location: u32,
 }
 
-impl Bitmap {
-    /// Create a new bitmap filled with white pixels (false).
-    ///
-    /// The bitmap is positioned at (0, 0).
-    pub(crate) fn new(width: u32, height: u32) -> Result<Self> {
-        Self::new_with(width, height, 0, 0, false)
+pub(crate) fn check_size(width: u32, height: u32) -> Result<()> {
+    if width > MAX_DIMENSION
+        || height > MAX_DIMENSION
+        || u64::from(width) * u64::from(height) > MAX_AREA
+    {
+        bail!(OverflowError::BitmapDimension);
     }
 
-    /// Create a new bitmap with full configuration.
+    Ok(())
+}
+
+impl Bitmap {
+    pub(crate) fn new(width: u32, height: u32, budget: &mut MemoryBudget) -> Result<Self> {
+        Self::new_with(width, height, 0, 0, false, budget)
+    }
+
     pub(crate) fn new_with(
         width: u32,
         height: u32,
         x_location: u32,
         y_location: u32,
         default_pixel: bool,
+        budget: &mut MemoryBudget,
     ) -> Result<Self> {
-        if width > MAX_DIMENSION || height > MAX_DIMENSION {
-            bail!(OverflowError::BitmapDimension);
-        }
+        check_size(width, height)?;
 
         let stride = width.div_ceil(WORD_BITS);
+        let len = stride as usize * height as usize;
+        budget.charge(Self::memory_size_for(len))?;
+
         let default_word: Word = if default_pixel { !0 } else { 0 };
-        let data = vec![default_word; stride as usize * height as usize];
+        let data = vec![default_word; len];
         let mut bitmap = Self {
             width,
             height,
@@ -85,32 +73,12 @@ impl Bitmap {
         Ok(bitmap)
     }
 
-    pub(crate) fn reinitialize(
-        &mut self,
-        width: u32,
-        height: u32,
-        default_pixel: bool,
-    ) -> Result<()> {
-        if width > MAX_DIMENSION || height > MAX_DIMENSION {
-            return Err(OverflowError::BitmapDimension.into());
-        }
+    pub(crate) fn memory_size(&self) -> usize {
+        Self::memory_size_for(self.data.len())
+    }
 
-        let stride = width.div_ceil(WORD_BITS);
-        let default_word: Word = if default_pixel { !0 } else { 0 };
-        self.width = width;
-        self.height = height;
-        self.stride = stride;
-        self.x_location = 0;
-        self.y_location = 0;
-        self.data.clear();
-        self.data
-            .resize(stride as usize * height as usize, default_word);
-
-        if default_pixel {
-            self.clear_padding();
-        }
-
-        Ok(())
+    fn memory_size_for(words: usize) -> usize {
+        words * WORD_BYTES as usize + size_of::<Self>()
     }
 
     fn clear_padding(&mut self) {
@@ -127,7 +95,6 @@ impl Bitmap {
         }
     }
 
-    /// Get a pixel value at (x, y).
     #[inline]
     pub(crate) fn get_pixel(&self, x: u32, y: u32) -> u8 {
         if x >= self.width || y >= self.height {
@@ -139,7 +106,6 @@ impl Bitmap {
         ((self.data[word_idx] >> bit_pos) & 1) as u8
     }
 
-    /// Set a pixel value at (x, y).
     #[inline]
     pub(crate) fn set_pixel(&mut self, x: u32, y: u32, value: u8) {
         if x >= self.width || y >= self.height {
@@ -151,33 +117,37 @@ impl Bitmap {
         self.data[word_idx] |= (value as Word) << bit_pos;
     }
 
-    /// Combine another bitmap into this one at a specific location.
-    ///
-    /// "These operators describe how the segment's bitmap is to be combined with
-    /// the page bitmap." (7.4.1.5)
-    ///
-    /// Pixels outside the destination bitmap are ignored.
-    pub(crate) fn combine(&mut self, other: &Self, x: i32, y: i32, operator: CombinationOperator) {
-        // TODO: Figure out how we can optimize this, especially since this is a
-        // bottleneck for symbols/patterns.
+    pub(crate) fn combine(
+        &mut self,
+        other: &Self,
+        x: i32,
+        y: i32,
+        operator: CombinationOperator,
+        cancel: Cancel<'_>,
+    ) -> Result<()> {
+        // TODO: Optimize this, it's a bottleneck for symbols and patterns.
         let dest_x_start = x.max(0);
         let dest_x_end = x.saturating_add(other.width as i32).min(self.width as i32);
 
         if dest_x_start >= dest_x_end {
-            return;
+            return Ok(());
         }
 
         let src_x_start = (dest_x_start - x) as u32;
         let dest_x_start = dest_x_start as u32;
         let dest_x_end = dest_x_end as u32;
 
-        for src_y in 0..other.height {
-            let dest_y = y.saturating_add(src_y as i32);
-            if dest_y < 0 || dest_y >= self.height as i32 {
-                continue;
+        let src_height = i64::from(other.height);
+        let src_y_start = (-i64::from(y)).clamp(0, src_height) as u32;
+        let src_y_end = (i64::from(self.height) - i64::from(y)).clamp(0, src_height) as u32;
+        let check_mask = row_mask(copy_work(other.width));
+
+        for src_y in src_y_start..src_y_end {
+            if src_y & check_mask == check_mask {
+                cancel.check()?;
             }
 
-            let dest_y = dest_y as u32;
+            let dest_y = (i64::from(y) + i64::from(src_y)) as u32;
 
             let first_word = dest_x_start / WORD_BITS;
             let last_word = (dest_x_end - 1) / WORD_BITS;
@@ -226,6 +196,8 @@ impl Bitmap {
                 self.data[dest_idx] = (dest_word & !mask) | (result & mask);
             }
         }
+
+        Ok(())
     }
 
     #[inline]
@@ -244,10 +216,14 @@ mod tests {
 
     #[test]
     fn combine_far_away() {
-        let mut page = Bitmap::new(8, 8).unwrap();
-        let region = Bitmap::new_with(8, 8, 0, 0, true).unwrap();
-        page.combine(&region, i32::MAX - 1, 0, CombinationOperator::Or);
-        page.combine(&region, 0, i32::MAX - 1, CombinationOperator::Or);
+        let budget = &mut MemoryBudget::new(None);
+        let mut page = Bitmap::new(8, 8, budget).unwrap();
+        let region = Bitmap::new_with(8, 8, 0, 0, true, budget).unwrap();
+        let cancel = Cancel(None);
+        page.combine(&region, i32::MAX - 1, 0, CombinationOperator::Or, cancel)
+            .unwrap();
+        page.combine(&region, 0, i32::MAX - 1, CombinationOperator::Or, cancel)
+            .unwrap();
         assert!(page.data.iter().all(|&w| w == 0));
     }
 }

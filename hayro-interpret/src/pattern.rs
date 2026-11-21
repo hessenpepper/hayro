@@ -15,7 +15,7 @@ use hayro_syntax::content::TypedIter;
 use hayro_syntax::object::Dict;
 use hayro_syntax::object::Stream;
 use hayro_syntax::object::dict::keys::{
-    BBOX, EXT_G_STATE, MATRIX, PAINT_TYPE, RESOURCES, SHADING, X_STEP, Y_STEP,
+    BBOX, MATRIX, PAINT_TYPE, RESOURCES, SHADING, X_STEP, Y_STEP,
 };
 use hayro_syntax::object::{Object, dict_or_stream};
 use hayro_syntax::page::Resources;
@@ -39,7 +39,6 @@ impl<'a> Pattern<'a> {
             Object::Dict(dict) => Some(Self::Shading(ShadingPattern::new(
                 &dict,
                 &ctx.interpreter_cache.object_cache,
-                ctx.fill_paint().alpha,
             )?)),
             Object::Stream(stream) => {
                 Some(Self::Tiling(Box::new(TilingPattern::new(stream, ctx)?)))
@@ -56,6 +55,13 @@ impl<'a> Pattern<'a> {
                 Arc::make_mut(&mut p.shading).clip_path = transformed_clip_path;
             }
             Self::Tiling(p) => p.matrix = transform * p.matrix,
+        }
+    }
+
+    pub(crate) fn set_opacity(&mut self, opacity: f32) {
+        match self {
+            Self::Shading(p) => p.opacity = opacity,
+            Self::Tiling(p) => p.opacity = opacity,
         }
     }
 
@@ -89,7 +95,7 @@ pub struct ShadingPattern {
 }
 
 impl ShadingPattern {
-    pub(crate) fn new(dict: &Dict<'_>, cache: &Cache, opacity: f32) -> Option<Self> {
+    pub(crate) fn new(dict: &Dict<'_>, cache: &Cache) -> Option<Self> {
         let shading = dict.get::<Object<'_>>(SHADING).and_then(|o| {
             let (dict, stream) = dict_or_stream(&o)?;
 
@@ -100,13 +106,9 @@ impl ShadingPattern {
             .map(Affine::new)
             .unwrap_or_default();
 
-        if dict.contains_key(EXT_G_STATE) {
-            warn!("shading patterns with ext_g_state are not supported yet");
-        }
-
         Some(Self {
             shading: Arc::new(shading),
-            opacity,
+            opacity: 1.0,
             matrix,
             transfer_function: None,
         })
@@ -115,7 +117,11 @@ impl ShadingPattern {
 
 impl CacheKey for ShadingPattern {
     fn cache_key(&self) -> u128 {
-        hash128(&(self.shading.cache_key(), self.matrix.cache_key()))
+        hash128(&(
+            self.shading.cache_key(),
+            self.matrix.cache_key(),
+            self.opacity.to_bits(),
+        ))
     }
 }
 
@@ -123,7 +129,6 @@ impl CacheKey for ShadingPattern {
 #[derive(Clone)]
 pub struct TilingPattern<'a> {
     cache_key: u128,
-    ctx_bbox: Rect,
     /// The bbox of the tiling pattern.
     pub bbox: Rect,
     /// The step in the x direction.
@@ -132,6 +137,8 @@ pub struct TilingPattern<'a> {
     pub y_step: f32,
     /// A transformation to apply prior to rendering.
     pub matrix: Affine,
+    /// An additional opacity to apply to the pattern cell as a whole.
+    pub opacity: f32,
     stream: Stream<'a>,
     is_color: bool,
     pub(crate) stroke_paint: Color,
@@ -168,21 +175,19 @@ impl<'a> TilingPattern<'a> {
             .map(Affine::new)
             .unwrap_or_default();
 
-        let ctx_bbox = ctx.bbox();
-
         let fill = ctx.fill_paint();
         let fill_cs = fill
             .color_space
             .pattern_cs()
             .unwrap_or(ColorSpace::device_gray());
-        let non_stroking_paint = Color::new(fill_cs, fill.color.clone(), fill.alpha);
+        let non_stroking_paint = Color::new(fill_cs, fill.color.clone(), 1.0);
 
         let stroke = ctx.stroke_paint();
         let stroke_cs = stroke
             .color_space
             .pattern_cs()
             .unwrap_or(ColorSpace::device_gray());
-        let stroke_paint = Color::new(stroke_cs, stroke.color.clone(), stroke.alpha);
+        let stroke_paint = Color::new(stroke_cs, stroke.color.clone(), 1.0);
         let nesting_depth = ctx.nesting_depth() + 1;
         let resources = Resources::new(dict.get(RESOURCES).unwrap_or_default());
 
@@ -192,7 +197,7 @@ impl<'a> TilingPattern<'a> {
             x_step,
             y_step,
             matrix,
-            ctx_bbox,
+            opacity: 1.0,
             is_color,
             stream,
             stroke_paint,
@@ -216,8 +221,7 @@ impl<'a> TilingPattern<'a> {
 
         let mut context = Context::new_with(
             state.ctm,
-            // TODO: bbox?
-            (initial_transform * self.ctx_bbox.to_path(0.1)).bounding_box(),
+            initial_transform.transform_rect_bbox(self.bbox),
             &self.cache,
             self.xref,
             self.settings.clone(),
@@ -225,7 +229,7 @@ impl<'a> TilingPattern<'a> {
             self.nesting_depth,
         );
 
-        let decoded = self.stream.decoded().ok()?;
+        let decoded = self.stream.decoded_data().ok()?;
         let iter = TypedIter::new(decoded.as_ref());
 
         let clip_path = ClipPath {
@@ -255,7 +259,6 @@ impl<'a> TilingPattern<'a> {
 
 impl CacheKey for TilingPattern<'_> {
     fn cache_key(&self) -> u128 {
-        // An uncolored pattern is drawn in the color it is painted with.
         let colors = (!self.is_color).then(|| {
             (
                 self.non_stroking_paint.to_rgba().to_rgba8(),
@@ -263,7 +266,12 @@ impl CacheKey for TilingPattern<'_> {
             )
         });
 
-        hash128(&(self.cache_key, self.matrix.cache_key(), colors))
+        hash128(&(
+            self.cache_key,
+            self.matrix.cache_key(),
+            self.opacity.to_bits(),
+            colors,
+        ))
     }
 }
 
@@ -295,7 +303,15 @@ impl<'a, T: Device<'a>> Device<'a> for StencilPatternDevice<'a, '_, T> {
         self.inner.push_clip_path(clip_path);
     }
 
-    fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'_>>, _: BlendMode) {}
+    fn push_transparency_group(
+        &mut self,
+        _: f32,
+        _: Option<SoftMask<'_>>,
+        _: BlendMode,
+        _: bool,
+        _: bool,
+    ) {
+    }
 
     fn draw_glyph_run(
         &mut self,

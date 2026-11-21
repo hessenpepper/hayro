@@ -5,46 +5,45 @@ This crate allows you to render pages of a PDF file into bitmaps. It is supposed
 lightweight, since we do not have any dependencies on the GPU. All the rendering happens on the CPU.
 
 The ultimate goal of this crate is to be a *feature-complete* and *performant* PDF rasterizer.
-With that said, we are currently still very far away from reaching that goal: So far, no effort
-has been put into performance optimizations, as we are still working on implementing missing features.
-However, this crate is currently the most comprehensive and feature-complete
+While there is still work to be done on both fronts, this crate is currently the most comprehensive and feature-complete
 implementation of a PDF rasterizer in pure Rust. This claim is supported by the fact that we currently
-include over 1000 PDF files in our regression test suite. The majority of those have been scraped
+include over 1500 PDF files in our regression test suite. The majority of those have been scraped
 from the `pdf.js` and `PDFBOX` test suites and therefore represent a very large and diverse sample
 of PDF files.
 
-As mentioned, there are still some serious limitations, including lack of support for
-encrypted/password-protected PDF files, blending and isolation, knockout groups as well as a range
-of smaller features such as color key masking. But you should be able to render the vast majority
+There are still some limitations, including lack of support for isolated and knockout
+transparency groups as well as a range of smaller features. But you should be able to render the vast majority
 of PDF files without too many issues.
 
 ## Safety
 This crate forbids unsafe code via a crate-level attribute.
 
 ## Examples
-For usage examples, see the [example](https://github.com/LaurenzV/hayro/tree/master/hayro/examples) in
+For usage examples, see the [example](https://github.com/LaurenzV/hayro/tree/main/hayro/examples) in
 the GitHub repository.
 
 ## Cargo features
-This crate has one optional feature:
+This crate has two default features:
 - `embed-fonts`: See the description of [`hayro-interpret`](https://docs.rs/hayro-interpret/latest/hayro_interpret/#cargo-features) for more information.
+- `embed-cmaps`: See the description of [`hayro-interpret`](https://docs.rs/hayro-interpret/latest/hayro_interpret/#cargo-features) for more information.
 */
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 use fearless_simd::Level;
+use glyph_cache::GlyphCache;
 use hayro_interpret::Device;
 use hayro_interpret::FillRule;
 use hayro_interpret::InterpreterCache;
 use hayro_interpret::InterpreterSettings;
-use hayro_interpret::font::GlyphRun;
+use hayro_interpret::font::{GlyphRun, HintingCache};
 use hayro_interpret::hayro_syntax::Pdf;
 use hayro_interpret::hayro_syntax::page::Page;
 use hayro_interpret::util::{RectExt, TransformExt};
 use hayro_interpret::{BlendMode, Context, DrawMode, DrawProps, ImageDrawProps, SoftMask};
 use hayro_interpret::{ClipPath, interpret_page};
-use kurbo::{Affine, BezPath, Rect, Shape};
+use kurbo::{Affine, BezPath, Rect};
 use pic_scale::Scaler;
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
@@ -66,16 +65,25 @@ mod display_list;
 // Model-Written: Claude Opus 5.5 (claude-opus-5-5), 2026-09-25
 pub use display_list::{DisplayList, render_region};
 mod glyph;
+mod glyph_cache;
 mod image;
 mod mask;
 mod paint;
 mod path;
+mod tiling;
+
+type OutlineCache = FxHashMap<(u128, u32), Option<Rc<BezPath>>>;
 
 pub(crate) struct GlobalState {
     level: Level,
-    outline_cache: Rc<RefCell<FxHashMap<u128, Rc<BezPath>>>>,
+    outline_cache: Rc<RefCell<OutlineCache>>,
+    glyph_cache: Rc<RefCell<GlyphCache>>,
+    hinting_cache: HintingCache,
     scaler: Scaler,
     force_image_interpolation: bool,
+    aliasing_threshold: Option<u8>,
+    hinting: bool,
+    glyph_caching: bool,
 }
 
 impl GlobalState {
@@ -83,8 +91,13 @@ impl GlobalState {
         Self {
             level: Level::new(),
             outline_cache: cache.outline_cache.clone(),
+            glyph_cache: cache.glyph_cache.clone(),
+            hinting_cache: cache.hinting_cache.clone(),
             scaler: Scaler::new(image::RESAMPLING_FUNCTION),
             force_image_interpolation: settings.force_image_interpolation,
+            aliasing_threshold: settings.aliasing_threshold,
+            hinting: settings.hinting,
+            glyph_caching: settings.glyph_caching,
         }
     }
 }
@@ -108,8 +121,16 @@ impl<'r> Renderer<'r> {
         }
     }
 
+    fn misses_target(&self, bbox: Rect) -> bool {
+        let target = Rect::new(0.0, 0.0, self.ctx.width() as f64, self.ctx.height() as f64);
+        !bbox.overlaps(target)
+    }
+
     fn child_context(&self, width: u16, height: u16) -> RenderContext {
-        RenderContext::new_with(width, height, derive_settings(self.ctx.render_settings()))
+        let mut ctx =
+            RenderContext::new_with(width, height, derive_settings(self.ctx.render_settings()));
+        ctx.set_aliasing_threshold(self.global.aliasing_threshold);
+        ctx
     }
 
     fn apply_draw_props(&mut self, props: &DrawProps<'_>) {
@@ -145,6 +166,8 @@ impl<'a, 'r> Device<'a> for Renderer<'r> {
         opacity: f32,
         mask: Option<SoftMask<'a>>,
         blend_mode: BlendMode,
+        _: bool,
+        _: bool,
     ) {
         Self::push_transparency_group(self, opacity, mask, blend_mode);
     }
@@ -175,14 +198,14 @@ impl<'a, 'r> Device<'a> for Renderer<'r> {
     }
 }
 
-/// A cache used by the renderer.
-///
-/// Ideally, such a cache should be constructed once per PDF and then reused across
-/// multiple render invocations on the same document.
-#[derive(Clone, Default)]
+/// A cache shared across renders of pages from the same PDF.
+// TODO: Allow clearing the cache.
+#[derive(Default)]
 pub struct RenderCache<'a> {
     pub(crate) interpreter_cache: InterpreterCache<'a>,
-    pub(crate) outline_cache: Rc<RefCell<FxHashMap<u128, Rc<BezPath>>>>,
+    pub(crate) outline_cache: Rc<RefCell<OutlineCache>>,
+    pub(crate) glyph_cache: Rc<RefCell<GlyphCache>>,
+    pub(crate) hinting_cache: HintingCache,
 }
 
 impl<'a> RenderCache<'a> {
@@ -191,15 +214,34 @@ impl<'a> RenderCache<'a> {
         Self {
             interpreter_cache: InterpreterCache::new(),
             outline_cache: Rc::new(RefCell::new(FxHashMap::default())),
+            glyph_cache: Rc::new(RefCell::new(GlyphCache::default())),
+            hinting_cache: HintingCache::new(),
         }
     }
 }
 
 /// Settings for rendering a page.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct RenderSettings {
     /// Whether all images should forcibly be rendered with bilinear interpolation.
     pub force_image_interpolation: bool,
+    /// Coverage threshold above which pixels are painted, or `None` for anti-aliasing.
+    pub aliasing_threshold: Option<u8>,
+    /// Whether text should be hinted.
+    pub hinting: bool,
+    /// Whether rasterized glyphs should be cached and reused.
+    pub glyph_caching: bool,
+}
+
+impl Default for RenderSettings {
+    fn default() -> Self {
+        Self {
+            force_image_interpolation: false,
+            aliasing_threshold: None,
+            hinting: true,
+            glyph_caching: true,
+        }
+    }
 }
 
 /// Settings for the output pixmap.
@@ -224,12 +266,6 @@ impl Default for PixmapSettings {
 }
 
 /// Render a page to a pixmap with the given settings.
-///
-/// This is a "simplified" method in case all you want to achieve is rendering a
-/// page with a certain scale factor.
-///
-/// If you want to have more control over how exactly the page is rendered (e.g. with
-/// an arbitrary transform or into a custom pixel buffer), use [`render_into`]
 pub fn render<'a>(
     page: &'a Page<'a>,
     cache: &RenderCache<'a>,
@@ -268,11 +304,7 @@ pub fn render<'a>(
     pixmap
 }
 
-/// Render a page into the given [`RenderContext`] with the
-/// given transform.
-///
-/// See the [following example](https://github.com/LaurenzV/hayro/blob/main/hayro/examples/render.rs)
-/// if you are unsure how to call this method.
+/// Render a page into the given [`RenderContext`] with the given transform.
 pub fn render_into<'a>(
     page: &'a Page<'a>,
     cache: &RenderCache<'a>,
@@ -281,9 +313,10 @@ pub fn render_into<'a>(
     ctx: &mut RenderContext,
     transform: Affine,
 ) {
+    let target = Rect::new(0.0, 0.0, ctx.width() as f64, ctx.height() as f64);
     let mut state = Context::new(
         transform,
-        Rect::new(0.0, 0.0, ctx.width() as f64, ctx.height() as f64),
+        target,
         &cache.interpreter_cache,
         page.xref(),
         interpreter_settings.clone(),
@@ -291,27 +324,36 @@ pub fn render_into<'a>(
     ctx.take_current_state();
     ctx.reset_mask();
     ctx.reset_filter_effect();
+    ctx.set_aliasing_threshold(render_settings.aliasing_threshold);
 
     let global = GlobalState::new(cache, render_settings);
     let mut device = Renderer::new(ctx, &global);
-    let mut clip_path = page.intersected_crop_box().to_kurbo().to_path(0.1);
-    clip_path.apply_affine(transform);
-    device.push_clip_path(&ClipPath {
-        path: clip_path,
-        fill: FillRule::NonZero,
-    });
+    let crop_box = page.intersected_crop_box().to_kurbo();
+    let [a, b, c, d, _, _] = transform.as_coeffs();
+    let axis_aligned = (b == 0.0 && c == 0.0) || (a == 0.0 && d == 0.0);
+    let mapped_crop_box = transform
+        .transform_rect_bbox(crop_box)
+        .inflate(1.0 / 256.0, 1.0 / 256.0);
+    let clip_crop_box = !axis_aligned || !mapped_crop_box.contains_rect(target);
+
+    if clip_crop_box {
+        device.ctx.set_transform(transform);
+        device.ctx.push_clip_rect(&crop_box);
+    }
 
     interpret_page(page, &mut state, &mut device);
 
-    device.pop_clip();
+    if clip_crop_box {
+        device.pop_clip();
+    }
 }
 
-// Just a convenience method for testing.
 #[doc(hidden)]
 pub fn render_pdf(
     pdf: &Pdf,
     scale: f32,
     settings: InterpreterSettings,
+    render_settings: &RenderSettings,
     range: Option<RangeInclusive<usize>>,
 ) -> Option<Vec<Pixmap>> {
     let cache = RenderCache::new();
@@ -328,7 +370,7 @@ pub fn render_pdf(
                 page,
                 &cache,
                 &settings,
-                &RenderSettings::default(),
+                render_settings,
                 &PixmapSettings {
                     x_scale: scale,
                     y_scale: scale,

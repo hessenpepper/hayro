@@ -17,8 +17,7 @@ pub struct Array<'a> {
     ctx: ReaderContext<'a>,
 }
 
-// Note that this is not structural equality, i.e. two arrays with the same
-// items are still considered different if they have different whitespaces.
+// Compares raw bytes, so white space matters.
 impl PartialEq for Array<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.data == other.data
@@ -149,8 +148,7 @@ impl<'a> Iterator for ArrayIter<'a> {
             return None;
         }
 
-        // The array was validated by skipping its items, which accepts some items that
-        // can't be read.
+        // Skipping accepts some items that can't be read.
         self.reader
             .read_with_context::<MaybeRef<Object<'_>>>(&self.ctx)
     }
@@ -229,8 +227,6 @@ impl<'a, T: ObjectLike<'a> + Copy + Default, const C: usize> TryFrom<Array<'a>> 
         }
 
         if iter.next().is_some() {
-            warn!("found excess elements in array");
-
             return Err(());
         }
 
@@ -453,6 +449,12 @@ mod tests {
         let res = array_impl(b"[34 /quotedbl /# 37 /percent]").unwrap();
         assert_eq!(res.len(), 5);
         assert!(matches!(&res[2], Object::Name(name) if name.as_ref() == b"#"));
+    }
+
+    #[test]
+    fn array_with_lone_plus() {
+        let array = Array::from_bytes(b"[+ 1]").unwrap();
+        assert_eq!(array.iter::<i32>().collect::<Vec<_>>(), vec![0, 1]);
     }
 
     #[test]

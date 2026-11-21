@@ -1,6 +1,6 @@
 [package]
 name = "hayro-jpeg2000"
-version = "0.4.1"
+version = "0.5.0"
 description = "A memory-safe, pure-Rust JPEG 2000 decoder."
 authors = { workspace = true }
 edition = { workspace = true }
@@ -12,7 +12,6 @@ exclude = ["/tests/"]
 autotests = false
 
 [dependencies]
-log = { workspace = true, optional = true }
 fearless_simd = { workspace = true, optional = true }
 image = { workspace = true, default-features = false, optional = true }
 moxcms = { workspace = true, optional = true }
@@ -25,8 +24,6 @@ std = []
 simd = ["fearless_simd", "std"]
 # Integration with the `image` crate.
 image = ["dep:image", "dep:moxcms", "std"]
-# Enable logging via the `log` crate.
-logging = ["dep:log"]
 
 [lints]
 workspace = true

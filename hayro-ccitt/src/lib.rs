@@ -4,8 +4,8 @@
 //! as defined in ITU-T Recommendations T.4 and T.6. These encodings are commonly
 //! used for bi-level (black and white) images in PDF documents and fax transmissions.
 //!
-//! The main entry point is the [`decode`] function, which takes encoded data, a
-//! [`DecoderContext`], and outputs each decoded row as a list of color changes
+//! The main entry point is the [`decode`] function, which takes encoded data and
+//! [`DecodeSettings`], and outputs each decoded row as a list of color changes
 //! through a [`Decoder`] trait that can be implemented according to your needs.
 //!
 //! The crate is `no_std` compatible but requires an allocator to be available.
@@ -23,47 +23,43 @@
 //!
 //! [`decode`]: crate::decode
 //! [`Decoder`]: crate::Decoder
+//! [`DecodeSettings`]: crate::DecodeSettings
 
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 #![forbid(missing_docs)]
 
 extern crate alloc;
 
 use crate::bit_reader::BitReader;
+use crate::context::DecoderContext;
 
 mod bit_reader;
+mod cancel;
 mod codes;
 mod context;
 mod error;
 mod group3;
 mod group4;
+mod sync;
 mod tables;
 
-pub use context::DecoderContext;
+pub use cancel::{CancelCheck, CancelHandle};
 pub use error::{DecodeError, Result};
 
-/// Decode the given image using the provided decoder context and decoder.
-///
-/// If decoding was successful, the number of bytes that have been read in total
-/// is returned.
-///
-/// If an error is returned, it means that the file is somehow malformed.
-/// However, even if that's the case, it is possible that a number
-/// of rows were decoded successfully and written into the decoder, so those
-/// can still be used, but the image might be truncated.
-pub fn decode(data: &[u8], decoder: &mut impl Decoder, ctx: &mut DecoderContext) -> Result<usize> {
-    ctx.reset();
-    let mut reader = BitReader::new(data);
-
-    if ctx.settings.columns == 0 {
+/// Decode `data` into `decoder`, returning the number of bytes read.
+pub fn decode(data: &[u8], decoder: &mut impl Decoder, settings: &DecodeSettings) -> Result<usize> {
+    if settings.columns == 0 {
         return Ok(0);
     }
 
-    match ctx.settings.encoding {
-        EncodingMode::Group4 => group4::decode(ctx, &mut reader, decoder)?,
-        EncodingMode::Group3_1D => group3::decode_1d(ctx, &mut reader, decoder)?,
-        EncodingMode::Group3_2D => group3::decode_2d(ctx, &mut reader, decoder)?,
+    let mut reader = BitReader::new(data);
+    let mut ctx = DecoderContext::new(settings);
+
+    match settings.encoding {
+        EncodingMode::Group4 => group4::decode(&mut ctx, &mut reader, decoder)?,
+        EncodingMode::Group3_1D => group3::decode_1d(&mut ctx, &mut reader, decoder)?,
+        EncodingMode::Group3_2D => group3::decode_2d(&mut ctx, &mut reader, decoder)?,
     }
 
     reader.align();
@@ -72,76 +68,33 @@ pub fn decode(data: &[u8], decoder: &mut impl Decoder, ctx: &mut DecoderContext)
 
 /// A sink for the rows of a CCITT image.
 pub trait Decoder {
-    /// Push a decoded row.
-    ///
-    /// `changes` contains the positions at which the color changes, in strictly
-    /// ascending order and each smaller than the number of columns. Each row
-    /// starts white, so the pixels from `changes[0]` up to `changes[1]` are
-    /// black, those from `changes[2]` up to `changes[3]` again, and so on. If
-    /// the number of changes is odd, the row ends black.
+    /// Push a row as the ascending positions where its color changes, starting from white.
     fn push_row(&mut self, changes: &[u32]);
 }
 
 /// Settings to apply during decoding.
-#[derive(Copy, Clone, Debug)]
-#[non_exhaustive]
+#[derive(Debug, Clone)]
 pub struct DecodeSettings {
-    /// How many columns the image has (i.e. its width).
+    /// The width of the image.
     pub columns: u32,
-    /// How many rows the image has (i.e. its height).
-    ///
-    /// In case `end_of_block` has been set to true, decoding will run until
-    /// the given number of rows have been decoded, or the `end_of_block` marker
-    /// has been encountered, whichever occurs first.
-    ///
-    /// If set to 0, decoding runs until the end-of-block marker or the end of the data.
+    /// The height of the image, or 0 to decode until an end-of-block marker or the end of data.
     pub rows: u32,
-    /// Whether the stream _MAY_ contain an end-of-block marker
-    /// (It doesn't have to. In that case this is set to `true` but there are
-    /// no end-of-block markers, hayro-ccitt will still use the value of `rows`
-    /// to determine when to stop decoding).
-    ///
-    /// Defaults to `true`.
+    /// Whether the stream may contain an end-of-block marker.
     pub end_of_block: bool,
     /// Whether the stream contains end-of-line markers.
-    ///
-    /// Defaults to `false`.
     pub end_of_line: bool,
-    /// Whether the data in the stream for each row is aligned to the byte
-    /// boundary.
-    ///
-    /// Defaults to `false`.
+    /// Whether each row starts at a byte boundary.
     pub rows_are_byte_aligned: bool,
     /// The encoding mode used by the image.
-    ///
-    /// Defaults to [`EncodingMode::Group3_1D`].
     pub encoding: EncodingMode,
-    /// Whether to reject data that violates the specification, instead of
-    /// decoding it as well as possible.
-    ///
-    /// Defaults to `false`.
+    /// Whether to reject malformed data instead of decoding it leniently.
     pub strict: bool,
+    /// A check for cancelling decoding.
+    pub cancel: Option<CancelHandle>,
 }
 
-impl DecodeSettings {
-    /// Creates new settings for an image with the given number of columns and
-    /// rows, using the default values for all other settings.
-    pub fn new(columns: u32, rows: u32) -> Self {
-        Self {
-            columns,
-            rows,
-            end_of_block: true,
-            end_of_line: false,
-            rows_are_byte_aligned: false,
-            encoding: EncodingMode::Group3_1D,
-            strict: false,
-        }
-    }
-}
-
-/// The encoding mode for CCITT fax decoding.
+/// A CCITT encoding mode.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum EncodingMode {
     /// Group 4 (MMR).
     Group4,
