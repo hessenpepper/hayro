@@ -43,12 +43,14 @@ pub(crate) fn tests() -> Vec<Test> {
                 },
             )
         })
-        .chain([Test::new("display_list::dashed_paths", vec![], || {
-            match Pdf::new(dashed_paths()) {
+        .chain([Test::new(
+            "display_list::dashed_paths",
+            vec![],
+            || match Pdf::new(dashed_paths()) {
                 Ok(pdf) => replay_matches_direct(&pdf),
                 Err(err) => Outcome::Failed(format!("couldn't load the generated PDF: {err:?}")),
-            }
-        })])
+            },
+        )])
         .collect()
 }
 
@@ -74,10 +76,7 @@ fn dashed_paths() -> Vec<u8> {
         .cubic_to(60.0, 175.0, 140.0, 85.0, 170.0, 130.0)
         .stroke();
     content.set_dash_pattern([0.02, 0.02], 0.0);
-    content
-        .move_to(30.0, 100.0)
-        .line_to(170.0, 100.0)
-        .stroke();
+    content.move_to(30.0, 100.0).line_to(170.0, 100.0).stroke();
     content.set_fill_rgb(0.1, 0.3, 0.8);
     content.rect(90.0, 40.0, 30.0, 30.0).fill_nonzero();
     let content = content.finish();
