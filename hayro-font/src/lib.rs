@@ -413,12 +413,7 @@ impl OutlineGlyph {
         self.font.glyph_advance_width(self.char_code)
     }
 
-    fn new(
-        font: OutlineFont,
-        id: GlyphId,
-        char_code: u32,
-        descriptor: DescriptorMetrics,
-    ) -> Self {
+    fn new(font: OutlineFont, id: GlyphId, char_code: u32, descriptor: DescriptorMetrics) -> Self {
         Self {
             id,
             program: font.program(),

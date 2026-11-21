@@ -5,8 +5,8 @@
 use crate::harness::runner::{Outcome, Test};
 use crate::{interpreter_settings, try_load_pdf};
 use hayro::hayro_interpret::util::RectExt;
-use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::kurbo::{Affine, Rect};
+use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{DisplayList, render_region};
 
 /// Committed PDFs covering text (TrueType, Type 1, CFF, CID), dashed and styled strokes,
@@ -86,11 +86,7 @@ fn replay_matches_direct(file: &str) -> Outcome {
             .expect("not canceled");
             let (a, b) = (replayed.data_as_u8_slice(), direct.data_as_u8_slice());
             if a != b {
-                let differing = a
-                    .chunks(4)
-                    .zip(b.chunks(4))
-                    .filter(|(p, q)| p != q)
-                    .count();
+                let differing = a.chunks(4).zip(b.chunks(4)).filter(|(p, q)| p != q).count();
                 return Outcome::Failed(format!(
                     "page {index}, {name}: {differing} pixels differ between the replay and \
                      the direct render"

@@ -216,14 +216,9 @@ impl DisplayList {
                 }
                 Item::PushClipRect(r) => device.push_clip_rect(&transform.transform_rect_bbox(*r)),
                 Item::PopClip => device.pop_clip(),
-                Item::PushGroup(o, b, isolated, knockout) => Device::push_transparency_group(
-                    &mut device,
-                    *o,
-                    None,
-                    *b,
-                    *isolated,
-                    *knockout,
-                ),
+                Item::PushGroup(o, b, isolated, knockout) => {
+                    Device::push_transparency_group(&mut device, *o, None, *b, *isolated, *knockout)
+                }
                 Item::PopGroup => device.pop_transparency_group(),
             }
         }
